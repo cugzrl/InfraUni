@@ -1,5 +1,3 @@
-"""Joint detection and forecasting network."""
+from .detector import InfraUniDetector
 
-from infrauni.models.joint_net import InfraUniBase
-
-__all__ = ["InfraUniBase"]
+__all__ = ["InfraUniDetector"]

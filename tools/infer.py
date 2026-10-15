@@ -1,129 +1,104 @@
-"""Run a checkpoint on nuScenes-mini val and save BEV figures plus json."""
+"""Run validation, official detection metrics, and the joint forecast metrics."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import pickle
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
 import yaml
-from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from infrauni.data.constants import CLASS_NAMES
-from infrauni.data.nuscenes_mini import NuScenesMiniJoint, collate_batch
-from infrauni.engine.metrics import accumulate, predictions_from_output
-from infrauni.engine.visualize import save_bev
-from infrauni.models.joint_net import InfraUniBase
-
-
-def to_device(batch, device):
-    out = {}
-    for key, value in batch.items():
-        if torch.is_tensor(value):
-            out[key] = value.to(device, non_blocking=True)
-        else:
-            out[key] = value
-    return out
+import infrauni  # noqa: F401
+from infrauni.data import NuScenesDetectionDataset, collate_nuscenes
+from infrauni.data.constants import FORECAST_SCORE
+from infrauni.engine import save_frame
+from infrauni.eval.nusc_det import evaluate_detection, to_nuscenes_result
+from infrauni.eval.protocol import accumulate_forecast, summarize_forecast
+from infrauni.models import InfraUniDetector
+from infrauni.device import pick_device
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/nuscenes_mini.yaml")
-    parser.add_argument("--ckpt", default="experiments/nuscenes_mini/last.pt")
-    parser.add_argument("--device", default="auto")
+    parser.add_argument("--config", default="configs/mini.yaml")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--mode", default=None)
+    parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--vis", type=int, default=6)
-    parser.add_argument("--split", default="val")
     args = parser.parse_args()
-
-    with open(ROOT / args.config, "r") as f:
-        cfg = yaml.safe_load(f)
-    if args.device == "auto":
-        if not torch.cuda.is_available():
-            device = torch.device("cpu")
-        else:
-            best_i, best_free = 0, -1
-            for i in range(torch.cuda.device_count()):
-                free, _ = torch.cuda.mem_get_info(i)
-                if free > best_free:
-                    best_i, best_free = i, free
-            device = torch.device(f"cuda:{best_i}")
-    else:
-        device = torch.device(args.device)
-
-    info_path = ROOT / cfg["data"]["info_path"]
-    with open(info_path, "rb") as f:
-        infos = pickle.load(f)["infos"]
-    dataset = NuScenesMiniJoint(infos, cfg, args.split)
-    loader = DataLoader(
-        dataset,
-        batch_size=int(cfg["train"]["batch_size"]),
-        shuffle=False,
-        num_workers=2,
-        collate_fn=collate_batch,
-    )
-    ckpt = torch.load(ROOT / args.ckpt, map_location="cpu")
-    model = InfraUniBase(ckpt.get("cfg", cfg)).to(device)
-    model.load_state_dict(ckpt["model"])
+    cfg = yaml.safe_load(Path(args.config).read_text())
+    state = torch.load(args.checkpoint, map_location="cpu")
+    if args.mode:
+        cfg["mode"] = args.mode
+    elif isinstance(state.get("cfg"), dict) and "mode" in state["cfg"]:
+        cfg["mode"] = state["cfg"]["mode"]
+    device = pick_device()
+    dataset = NuScenesDetectionDataset(ROOT / cfg["val_info"], train=False, image_size=cfg["image_size"], augment=False)
+    model = InfraUniDetector(
+        mode=cfg["mode"],
+        num_proposals=cfg["num_proposals"],
+        voxel_size=cfg["voxel_size"],
+        refine_blocks=cfg["refine_blocks"],
+    ).to(device)
+    model.load_state_dict(state["model"], strict=False)
     model.eval()
-
-    out_dir = ROOT / cfg["out_dir"] / f"infer_{args.split}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    preds, gts = [], []
-    saved = 0
-    with torch.no_grad():
-        for batch in loader:
-            batch = to_device(batch, device)
-            out = model(batch)
-            pred_i, gt_i = predictions_from_output(out, batch, score_thresh=0.0)
-            points = batch["points"].detach().cpu().numpy()
-            point_mask = batch["point_mask"].detach().cpu().numpy()
-            for b, (pred, gt) in enumerate(zip(pred_i, gt_i)):
-                preds.append(pred)
-                gts.append(gt)
-                if saved >= args.vis:
-                    continue
-                pts = points[b][point_mask[b]]
-                title = f"{gt['token'][:8]}  top-20 heatmap queries"
-                save_bev(
-                    out_dir / f"bev_{saved:02d}.png",
-                    pts,
-                    gt,
-                    pred,
-                    cfg["pc_range"],
-                    title,
-                )
-                saved += 1
-
-    metrics = accumulate(
-        preds,
-        gts,
-        dist_thresh=float(cfg["eval"]["dist_thresh"]),
-        score_thresh=float(cfg["eval"]["score_thresh"]),
-    )
-    dump = []
-    for pred in preds:
-        keep = np.argsort(-pred["query_score"])[:20]
-        names = [CLASS_NAMES[int(i)] for i in pred["label"][keep]]
-        dump.append(
+    work = Path(args.checkpoint).resolve().parent / "infer"
+    work.mkdir(parents=True, exist_ok=True)
+    det_results = []
+    predictions = []
+    predictions_all = []
+    ground_truth = []
+    limit = len(dataset) if args.max_frames <= 0 else min(args.max_frames, len(dataset))
+    for index in range(limit):
+        sample = dataset[index]
+        batch = collate_nuscenes([sample])
+        with torch.no_grad():
+            pred = model.predict(batch)
+        boxes = pred["boxes"].detach().cpu()
+        scores = pred["scores"].detach().cpu()
+        labels = pred["labels"].detach().cpu()
+        traj = pred["trajectories"].detach().cpu().numpy()
+        det_results.append(to_nuscenes_result(boxes, scores, labels))
+        score_np = scores.numpy()
+        label_np = labels.numpy()
+        keep = score_np >= cfg.get("forecast_score", FORECAST_SCORE)
+        predictions.append({"labels": label_np[keep], "scores": score_np[keep], "trajectories": traj[keep]})
+        predictions_all.append({"labels": label_np, "scores": score_np, "trajectories": traj})
+        gt_boxes = sample["gt_bboxes_3d"]
+        ground_truth.append(
             {
-                "token": pred["token"],
-                "names": names,
-                "score": pred["score"][keep].round(4).tolist(),
-                "box": pred["box"][keep].round(3).tolist(),
-                "traj_mode0": pred["traj"][keep][:, 0].round(3).tolist(),
+                "labels": sample["gt_labels_3d"].numpy(),
+                "current": gt_boxes.gravity_center[:, :2].numpy(),
+                "future": sample["gt_fut"].numpy(),
+                "future_mask": sample["gt_fut_mask"].numpy(),
             }
         )
-    (out_dir / "predictions.json").write_text(json.dumps(dump))
-    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    print(json.dumps(metrics, indent=2))
-    print(f"wrote {out_dir}")
+        if index < args.vis:
+            save_frame(work / f"{index:03d}.png", sample["points"], gt_boxes, boxes, traj, scores)
+        if index % 10 == 0:
+            print(f"frame {index} boxes {len(scores)} refine {pred['refine_blocks']}", flush=True)
+    if limit != len(dataset):
+        print("partial run, skip official detection eval")
+        metrics = {}
+    else:
+        metrics = evaluate_detection(str(ROOT / cfg["val_info"]), det_results, work)
+    forecast = summarize_forecast(accumulate_forecast(predictions, ground_truth))
+    forecast_all = summarize_forecast(accumulate_forecast(predictions_all, ground_truth))
+    payload = {
+        "detection": {key: metrics[key] for key in ("mAP", "NDS") if key in metrics},
+        "forecast": {key: forecast[key] for key in ("EPA", "minADE", "minFDE", "MR", "matched")},
+        "forecast_all_scores": {key: forecast_all[key] for key in ("EPA", "minADE", "minFDE", "MR", "matched")},
+        "per_class": forecast["per_class"],
+    }
+    (work / "metrics.json").write_text(json.dumps(payload, indent=2))
+    printable = dict(payload["detection"])
+    printable["forecast"] = payload["forecast"]
+    print(json.dumps(printable, indent=2))
 
 
 if __name__ == "__main__":

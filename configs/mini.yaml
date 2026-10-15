@@ -1,0 +1,17 @@
+# nuScenes-mini. mode is det, pred_head, or joint.
+mode: det
+epochs: 3
+batch_size: 1
+workers: 0
+lr: 0.0001
+weight_decay: 0.01
+grad_clip: 10.0
+num_proposals: 200
+voxel_size: [0.075, 0.075, 0.2]
+image_size: [800, 448]
+refine_blocks: 2
+augment: true
+train_info: data/infos/nuscenes_infos_train.pkl
+val_info: data/infos/nuscenes_infos_val.pkl
+forecast_score: 0.1
+work_dir: experiments/mini_det

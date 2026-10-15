@@ -1,68 +1,51 @@
-"""BEV figure for a single frame: points, boxes and future trajectories."""
+"""BEV and camera overlays for one frame."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 
-def _corners(box):
-    x, y, _, width, length, _, yaw = box
-    c, s = np.cos(yaw), np.sin(yaw)
-    local = np.array(
-        [
-            [length / 2, width / 2],
-            [length / 2, -width / 2],
-            [-length / 2, -width / 2],
-            [-length / 2, width / 2],
-            [length / 2, width / 2],
-        ]
+def _box_corners(box):
+    x, y, _, width, length, _, yaw = box[:7]
+    corners = np.array(
+        [[length / 2, width / 2], [length / 2, -width / 2], [-length / 2, -width / 2], [-length / 2, width / 2]]
     )
-    rot = np.array([[c, -s], [s, c]])
-    return local @ rot.T + np.array([x, y])
+    rotation = np.array([[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]])
+    return corners @ rotation.T + np.array([x, y])
 
 
-def save_bev(path, points, gt, pred, pc_range, title):
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(7, 7))
-    if points is not None and len(points):
-        step = max(len(points) // 8000, 1)
-        pts = points[::step]
-        ax.scatter(pts[:, 0], pts[:, 1], s=0.2, c="0.6", linewidths=0)
-    for box in gt["box"]:
-        poly = _corners(box)
-        ax.plot(poly[:, 0], poly[:, 1], color="lime", linewidth=1.0)
-    if gt.get("traj") is not None:
-        for xy, traj, mask in zip(gt["xy"], gt["traj"], gt["traj_mask"]):
-            valid = mask > 0.5
-            if valid.sum() < 1:
-                continue
-            path_xy = np.concatenate([xy[None, :], traj[valid]], axis=0)
-            ax.plot(path_xy[:, 0], path_xy[:, 1], color="green", linewidth=0.8)
-    ax.plot([], [], color="lime", label="GT box")
-    ax.plot([], [], color="green", label="GT future")
-    ax.plot([], [], color="red", label="pred box")
-    ax.plot([], [], color="orange", label="pred future (mode 0)")
-    if len(pred["score"]):
-        rank = pred["query_score"] if "query_score" in pred else pred["score"]
-        order = np.argsort(-rank)[:20]
-        for box in pred["box"][order]:
-            poly = _corners(box)
-            ax.plot(poly[:, 0], poly[:, 1], color="red", linewidth=0.8, alpha=0.85)
-        if pred.get("traj") is not None:
-            for xy, traj in zip(pred["xy"][order], pred["traj"][order]):
-                path_xy = np.concatenate([xy[None, :], traj[0]], axis=0)
-                ax.plot(path_xy[:, 0], path_xy[:, 1], color="orange", linewidth=0.7, alpha=0.85)
-    ax.legend(loc="upper right", fontsize=8)
-    ax.set_xlim(pc_range[0], pc_range[3])
-    ax.set_ylim(pc_range[1], pc_range[4])
+def save_frame(path, points, gt_boxes, pred_boxes, trajectories, scores, score_min=0.1):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    points = points.detach().cpu().numpy() if torch.is_tensor(points) else np.asarray(points)
+    gt_boxes = gt_boxes.tensor.detach().cpu().numpy() if hasattr(gt_boxes, "tensor") else np.asarray(gt_boxes)
+    pred_boxes = pred_boxes.detach().cpu().numpy() if torch.is_tensor(pred_boxes) else np.asarray(pred_boxes)
+    trajectories = np.asarray(trajectories)
+    scores = np.asarray(scores)
+    keep = scores >= score_min
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.scatter(points[::4, 0], points[::4, 1], s=0.2, c="0.6", linewidths=0)
+    for box in gt_boxes:
+        corners = _box_corners(box)
+        ax.plot(np.r_[corners[:, 0], corners[0, 0]], np.r_[corners[:, 1], corners[0, 1]], color="lime", lw=1)
+    for box, traj in zip(pred_boxes[keep], trajectories[keep]):
+        corners = _box_corners(box)
+        ax.plot(np.r_[corners[:, 0], corners[0, 0]], np.r_[corners[:, 1], corners[0, 1]], color="tomato", lw=1)
+        best = traj[0, 1:]
+        ax.plot(best[:, 0], best[:, 1], color="deepskyblue", lw=1)
+        ax.scatter([box[0]], [box[1]], c="red", s=8)
+        ax.scatter([traj[0, 0, 0]], [traj[0, 0, 1]], c="cyan", s=8)
+    ax.set_xlim(-54, 54)
+    ax.set_ylim(-54, 54)
     ax.set_aspect("equal")
-    ax.set_title(title)
-    ax.set_xlabel("x (m)")
-    ax.set_ylabel("y (m)")
+    ax.set_title(path.stem)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)

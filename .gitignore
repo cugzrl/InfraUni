@@ -3,3 +3,5 @@ __pycache__/
 data/infos/
 experiments/
 .DS_Store
+setup_env.sh
+environment.yml

@@ -1,3 +1,5 @@
-"""InfraUni: joint LiDAR-camera detection and trajectory forecasting."""
+"""InfraUni: LiDAR-camera detection and trajectory forecasting."""
 
-__version__ = "0.1.0"
+from .compat import setup
+
+setup()
