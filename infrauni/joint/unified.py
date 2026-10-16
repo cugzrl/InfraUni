@@ -19,12 +19,13 @@ from .model import QueryDeTra, _with_current
 class UnifiedTransFusionDeTra(nn.Module):
     """Frozen or partially trained TransFusion-LC in front of DeTra."""
 
-    def __init__(self, detector, blocks=2, detach_anchor=True, causal_time=False, forecast_weight=1.0):
+    def __init__(self, detector, blocks=2, detach_anchor=True, causal_time=False, forecast_weight=1.0, match_mode="class_gate"):
         super().__init__()
         self.detector = detector
         self.detach_anchor = detach_anchor
         self.causal_time = causal_time
         self.forecast_weight = float(forecast_weight)
+        self.match_mode = match_mode
         self.modes = 6
         self.future = 12
         hidden = 128
@@ -148,6 +149,7 @@ class UnifiedTransFusionDeTra(nn.Module):
             "box_mode": "full",
             "detach_anchor": self.detach_anchor,
             "forecast_weight": self.forecast_weight,
+            "match_mode": self.match_mode,
             "unified": True,
             "object_logits": detra_out["object_logits"],
             "class_logits": detra_out["class_logits"],

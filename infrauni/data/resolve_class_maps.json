@@ -1,0 +1,14 @@
+{
+  "detection_official": {
+    "van": "barrier",
+    "golf cart": "traffic_cone",
+    "construction vehicle": "construction_vehicle",
+    "note": "Used by the official TransFusion-L baseline so detection numbers stay comparable."
+  },
+  "forecast": {
+    "van": "van",
+    "golf cart": "golf_cart",
+    "construction vehicle": "construction_vehicle",
+    "note": "Dynamic objects keep their own names. A golf cart is not a traffic cone."
+  }
+}

@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from detra_repro.losses import sigmoid_focal_loss, wta_forecasting_loss
 
-from .targets import attach_future, match_queries
+from .targets import attach_future, match_cost, match_queries
 
 FORECAST_ONLY = ("future_gru", "future_head", "future_mode_head", "forecast.")
 
@@ -230,7 +230,25 @@ def compute_unified_loss(output, gt_boxes, gt_labels, track, gt_velocity=None):
 
     proposal = output["proposal_boxes"][0]
     labels = output["proposal_labels"][0]
-    matched = match_queries(proposal[:, :2], labels, gt_boxes[:, :2], gt_labels)
+    gated = match_queries(proposal[:, :2], labels, gt_boxes[:, :2], gt_labels)
+    if output.get("match_mode", "class_gate") == "cost":
+        first = output["detra"]["aux_outputs"][0]
+        class_logits = first["class_logits"]
+        object_logits = first["object_logits"]
+        if class_logits.ndim == 3:
+            class_logits = class_logits[0]
+        if object_logits.ndim == 2:
+            object_logits = object_logits[0]
+        matched = match_cost(
+            proposal[:, :2],
+            proposal[:, :7],
+            class_logits,
+            object_logits,
+            gt_boxes[:, :7],
+            gt_labels,
+        )
+    else:
+        matched = gated
     future, mask = attach_future(matched, gt_boxes[:, :2], gt_labels, track)
     targets = (matched >= 0).float()
     outputs = output["detra"]["aux_outputs"]
@@ -273,7 +291,7 @@ def compute_unified_loss(output, gt_boxes, gt_labels, track, gt_velocity=None):
         "loss_det": det_total / scale,
         "loss_forecast": fore_total / scale * weight,
         "matched": int(targets.sum()),
-        "switch_rate": 0.0,
+        "switch_rate": float((matched != gated).float().mean()) if matched.numel() else 0.0,
         "proposal_recall": quality["proposal_recall"],
         "proposal_center": quality["proposal_center"],
         "final_center": quality["final_center"],

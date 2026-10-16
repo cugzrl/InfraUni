@@ -32,6 +32,47 @@ def match_queries(pred_xy, pred_labels, gt_xy, gt_labels, dist_thresh=2.0, class
     return matched
 
 
+def match_cost(
+    pred_xy,
+    pred_boxes,
+    class_logits,
+    object_logits,
+    gt_boxes,
+    gt_labels,
+    dist_thresh=2.0,
+):
+    """Hungarian match on distance, box shape, and DeTra class probability.
+
+    The class term uses the decoder distribution, not the TransFusion label.
+    A nearby query can receive a ground-truth object whose candidate class
+    was wrong. Pairs farther than ``dist_thresh`` stay unmatched, and each
+    ground-truth object is used at most once.
+    """
+
+    count = pred_xy.shape[0]
+    matched = torch.full((count,), -1, dtype=torch.long, device=pred_xy.device)
+    if count == 0 or gt_boxes.shape[0] == 0:
+        return matched
+    distance = torch.cdist(pred_xy.float(), gt_boxes[:, :2].float())
+    distance = torch.nan_to_num(distance, nan=1.0e6, posinf=1.0e6, neginf=1.0e6)
+    log_size = pred_boxes[:, 3:6].clamp_min(1e-2).log()
+    gt_log_size = gt_boxes[:, 3:6].clamp_min(1e-2).log()
+    size = (log_size[:, None, :] - gt_log_size[None, :, :]).abs().sum(dim=-1)
+    heading = torch.atan2(
+        torch.sin(pred_boxes[:, None, 6] - gt_boxes[None, :, 6]),
+        torch.cos(pred_boxes[:, None, 6] - gt_boxes[None, :, 6]),
+    ).abs()
+    class_cost = -class_logits.log_softmax(dim=-1)[:, gt_labels]
+    object_cost = -object_logits.sigmoid()[:, None]
+    cost = distance + 0.25 * size + 0.5 * heading + class_cost + object_cost
+    rows, cols = _assign(cost.detach().cpu())
+    for row, col in zip(rows, cols):
+        if float(distance[row, col]) > dist_thresh:
+            continue
+        matched[row] = col
+    return matched
+
+
 def _assign(cost):
     from scipy.optimize import linear_sum_assignment
 

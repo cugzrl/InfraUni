@@ -41,4 +41,4 @@ B 和稳定 F0 的 5、10、15 epoch 由当前这轮训练写出后再评估。�
 
 V3 已经说明：预测损失把修正后的中心当作轨迹原点时，检测 mAP 会掉。D1 断开这个原点后，检测保持 LC 的水平，预测在 5 epoch 之后超过 2 epoch 的独立 MLP。F0 的第 5 epoch 预测更好，检测没有超过 LC。单步梯度余弦接近 0，伤害来自多步积累的中心移动，不是匹配切换。
 
-跨帧记忆默认关闭。它不参加上面的 B、D1、F0 对照。设计见 `docs/FORESIGHT_STREAMING.md`。
+跨帧记忆默认关闭。它不参加上面的 B、D1、F0 对照。设计见 `docs/archive/FORESIGHT_STREAMING.md`。

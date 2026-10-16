@@ -188,4 +188,4 @@ bash scripts/test_transfusion_lc.sh experiments/transfusion_voxel_LC_mini/epoch_
 
 - 没有官方发布的完整 LC 检测权重可做对照。
 - mini 上的 LC 只训了 1 个 epoch，不是官方的 6 个 epoch。
-- 自写检测器已经从 `infrauni/models` 移除。联合轨迹见 `docs/DETRA_JOINT.md`。
+- 自写检测器已经从 `infrauni/models` 移除。联合轨迹见 `docs/archive/DETRA_JOINT.md`。当前统一解码见 `docs/UNIFIED_DETRA_EXPERIMENT.md`。

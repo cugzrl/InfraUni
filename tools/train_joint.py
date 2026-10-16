@@ -73,12 +73,14 @@ VARIANTS = {
     "u0": {"arch": "unified", "mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "full", "detach_anchor": True, "causal_time": False, "forecast_weight": 1.0},
     "u_nofore": {"arch": "unified", "mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "full", "detach_anchor": True, "causal_time": False, "forecast_weight": 0.0},
     "u_causal": {"arch": "unified", "mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "full", "detach_anchor": True, "causal_time": True, "forecast_weight": 1.0},
+    "u_cost": {"arch": "unified", "mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "full", "detach_anchor": True, "causal_time": False, "forecast_weight": 1.0, "match_mode": "cost"},
 }
 
 for _spec in VARIANTS.values():
     _spec.setdefault("memory", "none")
     _spec.setdefault("arch", "series")
     _spec.setdefault("forecast_weight", 1.0)
+    _spec.setdefault("match_mode", "class_gate")
 
 
 class EpochOrder(Sampler):
@@ -257,6 +259,7 @@ def main():
             detach_anchor=spec["detach_anchor"],
             causal_time=spec["causal_time"],
             forecast_weight=spec["forecast_weight"],
+            match_mode=spec["match_mode"],
         )
     else:
         model = JointTransFusionDeTra(
@@ -503,6 +506,7 @@ def main():
                 "memory": spec["memory"],
                 "arch": spec["arch"],
                 "forecast_weight": spec["forecast_weight"],
+                "match_mode": spec["match_mode"],
                 "global_step": global_step,
                 "optimizer": optimizer.state_dict(),
                 "rng": _rng_state(),

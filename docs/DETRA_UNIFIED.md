@@ -19,7 +19,7 @@
 - 框是 PoseUpdate 的 7 维框加上 `pred_velocity`
 - 轨迹是同一组 Query 的多模式未来点
 
-匹配仍在 TransFusion 候选上做一次，后面的 Refinement block 共用这次 Query 到真值的对应。这样框在更新时不会把轨迹改配到另一个目标。
+默认匹配 `class_gate` 仍在 TransFusion 候选上做一次，后面的 Refinement block 共用这次 Query 到真值的对应。`u_cost` 改用 DeTra 第 0 个 block 的类别概率、存在性和框回归代价，不再用 TransFusion 的硬类别门，距离超过 2 m 的配对仍然丢弃。两种分配都保证一个 Query 只对应一个真值。数字见 `docs/UNIFIED_DETRA_EXPERIMENT.md`。
 
 ## 梯度
 
@@ -48,6 +48,6 @@ DeTra 自己的 `detach_pose_refinement` 仍然切断 block 之间的位姿梯�
 
 预测损失没有进入 `box_head`。检测损失没有进入 `future_head`。共享的时间注意力和 Query 投影两边都有梯度。可训练参数 2228321，和冻结检测器的旧 DeTra 相同，没有把跨帧记忆算进去。零初始化的框头在这一步没有移动中心：候选中心误差 0.107 m，解码后仍是 0.107 m。当前框和轨迹起点对齐。这一步的候选召回是该帧上的数字，不是整个验证集。
 
-## 还没有完成的对照
+## 对照
 
-A（独立预测头）和 B（旧的框修正）已有 2 epoch 结果，见 `docs/DETRA_JOINT_V3.md`。`u0` 需要用同一套 mini 划分和同一份 LC 初始化训练到相同轮次之后，才能和它们比较 mAP、NDS、EPA、minADE、minFDE、MR，以及候选召回和最终中心误差。在这组数字出来之前，不把统一解码说成优于串联结构。
+同一套 mini 划分、同一份 LC 初始化和 2 epoch 预算下的 mAP、NDS、EPA、minADE、minFDE、MR 写在 `docs/UNIFIED_DETRA_EXPERIMENT.md`。候选检测仍是 mAP 0.530、NDS 0.508。DeTra 发布的检测低于这个候选，中心几乎没有被修正。
