@@ -6,6 +6,8 @@
 cd /home/kemove/devdata1/zrl/InfraUni
 bash scripts/train_transfusion_l.sh
 bash scripts/test_transfusion_l.sh experiments/transfusion_voxel_L_mini/epoch_1.pth
+bash scripts/train_transfusion_lc.sh
+bash scripts/test_transfusion_lc.sh experiments/transfusion_voxel_LC_mini/epoch_1.pth
 ```
 
 ## 目录
@@ -19,6 +21,8 @@ bash scripts/test_transfusion_l.sh experiments/transfusion_voxel_L_mini/epoch_1.
 - `docs/`：各阶段和评估协议
 
 ## 命令
+
+当前检测基线是上面的官方 TransFusion 脚本。下面是早期自写流程，不用于正式检测复现。
 
 ```bash
 cd /home/kemove/devdata1/zrl/InfraUni

@@ -58,7 +58,17 @@ GT database 复用同一份 mini 数据里已经生成的 `nuscenes_gt_database`
 - `1Wk8p2LJEhwfKfhsKzlU9vDBOd0zn38dN`：`transfusionL_submission.json`，约 339 MB
 - `1X7_ig4v5A2vKsiHtUGtgeMN-0RJKsM6W`：`transfusion_submission.json`，约 339 MB
 
-README 也写明因华为 IAS BU 的政策不发布预训练模型。本机没有 `fusion_voxel0075_R50.pth`。因此 LiDAR 模型从随机初始化做 mini smoke test，LC 没有开始训练。
+README 也写明因华为 IAS BU 的政策不发布预训练模型。
+
+LC 使用的是 MSMDFusion 发布的第一阶段合并权重，原文件为 `/home/kemove/devdata1/zrl/InfraUni/fusion_voxel0075_R50.pth`（135 MB）。它包含 TransFusion-L 和 nuImages 预训练的 ResNet-50 / FPN。checkpoint 里 640 个 tensor 与官方 LC 模型同名，没有多余键。其中 21 个稀疏卷积核是 `(out, kD, kH, kW, in)`，而本仓库的 `SparseConvolution` 使用 `(kD, kH, kW, in, out)`。`tools/convert_fusion_init.py` 只对这 21 个核做 `permute(1, 2, 3, 4, 0)`，写出 `checkpoints/fusion_voxel0075_R50_mmdet3d.pth`。转换后形状全部对齐。
+
+模型共 928 个 tensor，加载 640 个（69.0%）。缺失的 288 个都是 LC 才有、需要在第二阶段学习的图像融合层：
+
+- `decoder.1`：图像 query decoder
+- `decoder.2` 到 `decoder.7`：六路相机各自的 cross-attention
+- `prediction_heads.1`、`heatmap_head_img`、`shared_conv_img`、`fc`
+
+官方配置保持 `freeze_img=True` 和 `freeze_lidar_components=True`。被冻结的 LiDAR backbone、LiDAR decoder、检测头第一层，以及 ResNet-50 和 FPN，全部能在转换后的权重里找到，`frozen_but_missing = 0`。随机初始化的只有上面这些未冻结的融合层。没有使用 mini 上从零训练 1 个 epoch 的 LiDAR 权重。
 
 ## 相对官方配置的运行参数
 
@@ -72,7 +82,7 @@ README 也写明因华为 IAS BU 的政策不发布预训练模型。本机没�
 | 学习率 | 1e-4，按 16 的总 batch 设定 | 仍为 1e-4，没有按单卡缩小 |
 | 日志 | 每 50 iter，含 TensorBoard | 每 20 iter，只保留文本日志 |
 
-LC 配置 `configs/transfusion_mini_voxel_LC.py` 保留 `load_from = checkpoints/fusion_voxel0075_R50.pth`。该文件不存在时，`load_checkpoint` 抛出 `OSError: ... is not a checkpoint file`，不会静默改成随机初始化再训练。
+LC 配置 `configs/transfusion_mini_voxel_LC.py` 的 `load_from` 指向转换后的绝对路径。原文件不能直接加载：稀疏卷积形状对不上时，这些层会保持随机初始化，同时被 `freeze_lidar_components` 冻住。
 
 ## TransFusion-L
 
@@ -124,13 +134,45 @@ $PY tools/test.py /home/kemove/devdata1/zrl/InfraUni/configs/transfusion_mini_vo
 
 ## TransFusion-LC
 
-官方配置可以建出完整模型：`TransFusionDetector`，`fuse_img=True`，图像分支 175 组参数，LiDAR 分支 399 组参数。验证集第 0 帧通过官方 pipeline 读入的图像是 `(6, 3, 448, 800)`，点云是 `(34752, 5)`，`lidar2img` 有 6 个。
+```bash
+cd /home/kemove/devdata1/zrl/InfraUni
+bash scripts/train_transfusion_lc.sh
+bash scripts/test_transfusion_lc.sh experiments/transfusion_voxel_LC_mini/epoch_1.pth
+```
 
-`checkpoints/fusion_voxel0075_R50.pth` 不存在，因此没有启动 LC 训练，也没有把随机初始化的图像 FPN 当成已经复现的融合模型。论文里的 LC 是在预训练 LiDAR backbone 上再训 6 个 epoch，并冻结 LiDAR 分量。没有这份初始化权重时，不能进行这一阶段。
+网络、六路相机 pipeline、`freeze_img`、`freeze_lidar_components` 和评估都沿用官方 `transfusion_nusc_voxel_LC.py`。mini 上同样是 1 张 GPU、batch 1、1 个 epoch，学习率仍是官方的 1e-4。官方完整日程是在预训练 LiDAR 上再训 6 个 epoch。
+
+一次 epoch：
+
+- 同样是 323 个原始样本、CBGS 后 1690 iteration
+- 稳定阶段约 0.30 秒 / iteration
+- 日志中的 `memory` 约 6634 MB
+- 总损失从第 20 iter 的 1531（heatmap 1516，matched IoU 0.058）降到第 1680 iter 的 0.700（heatmap 0.228，matched IoU 0.590）
+- 框回归损失同期从 2.65 降到 0.406。LiDAR 主干来自预训练，所以一开始的框损失就远低于从零训练的 TransFusion-L
+- checkpoint：`experiments/transfusion_voxel_LC_mini/epoch_1.pth`
+
+官方 devkit 在 `mini_val` 上，训练结束时的验证和 `tools/test.py` 重新加载同一权重，结果一致：
+
+| 指标 | 数值 |
+| --- | ---: |
+| mAP | 0.530 |
+| NDS | 0.508 |
+| mATE | 0.415 |
+| mASE | 0.507 |
+| mAOE | 0.509 |
+| mAVE | 0.667 |
+| mAAE | 0.472 |
+| car AP | 0.908 |
+| pedestrian AP | 0.930 |
+| bus AP | 0.981 |
+| truck AP | 0.810 |
+
+`mini_val` 里带 LiDAR 点的真值没有 trailer、construction_vehicle 和 barrier。官方评估仍把这三个类别按 AP 0 计入 10 类平均，所以 0.530 低于有样本类别的平均。这不是完整 nuScenes val 或 test 上的论文数字。
+
+验证集第 0、10、20 帧上，分数高于 0.1 的预测框中心到最近 LiDAR 点的中位距离分别是 0.081 m、0.063 m 和 0.096 m。BEV 图在 `experiments/transfusion_voxel_LC_mini/vis/`。
 
 ## 还没做的事
 
-- 没有公开的检测权重可做推理对照。
-- LC 训练被缺少的 `load_from` 挡住。
-- mini 上 1 个 epoch 只说明官方训练、保存、重载和 devkit 评估是通的。
-- 自写的 `infrauni/models` 不再作为正式检测基线。
+- 没有官方发布的完整 LC 检测权重可做对照。
+- mini 上只训了 1 个 epoch，不是官方的 6 个 epoch。
+- 自写的 `infrauni/models` 不再作为正式检测基线，也没有接入 DeTra。

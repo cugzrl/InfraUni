@@ -11,6 +11,6 @@ checkpoint_config = dict(interval=1)
 log_config = dict(interval=20, hooks=[dict(type="TextLoggerHook")])
 
 work_dir = "/home/kemove/devdata1/zrl/InfraUni/experiments/transfusion_voxel_LC_mini"
-# Official staged init. Training must stop if this file is absent.
-load_from = "checkpoints/fusion_voxel0075_R50.pth"
+# Sparse-conv kernels from the MSMDFusion release, permuted to (kD, kH, kW, in, out).
+load_from = "/home/kemove/devdata1/zrl/InfraUni/checkpoints/fusion_voxel0075_R50_mmdet3d.pth"
 resume_from = None
