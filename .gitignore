@@ -5,3 +5,4 @@ experiments/
 .DS_Store
 setup_env.sh
 environment.yml
+third_party

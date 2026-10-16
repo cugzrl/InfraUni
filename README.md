@@ -2,6 +2,11 @@
 
 面向固定路侧场景的 LiDAR-Camera 3D 检测与轨迹预测
 
+```bash
+cd /home/kemove/devdata1/zrl/InfraUni
+bash scripts/train_transfusion_l.sh
+bash scripts/test_transfusion_l.sh experiments/transfusion_voxel_L_mini/epoch_1.pth
+```
 
 ## 目录
 
