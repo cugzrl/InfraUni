@@ -39,16 +39,24 @@ def accumulate_forecast(predictions, ground_truth):
     ``labels``, ``future`` [M, future, 2] and ``future_mask`` [M, future].
     """
     per_class = {
-        name: {"hit": 0.0, "fp": 0.0, "gt": 0.0, "ade": 0.0, "fde": 0.0, "mr": 0.0, "n": 0.0}
+        name: {
+            "hit": 0.0, "fp": 0.0, "gt": 0.0, "ade": 0.0, "fde": 0.0,
+            "mr": 0.0, "n": 0.0, "pred": 0.0,
+        }
         for name in CLASS_NAMES
     }
     for pred, gt in zip(predictions, ground_truth):
         traj = np.asarray(pred["trajectories"], dtype=np.float64)
         future_steps = traj.shape[2] - 1
+        gt_mask = np.asarray(gt["future_mask"])
+        if gt_mask.size == 0:
+            gt_mask = np.zeros((0, future_steps))
         for class_id, name in enumerate(CLASS_NAMES):
+            # EPA and minFDE are defined at the 6 s horizon, so the last step must exist.
             gt_keep = np.asarray(gt["labels"]) == class_id
-            valid = np.asarray(gt["future_mask"])[:, -1] > 0 if len(gt["future_mask"]) else np.zeros((0,), dtype=bool)
-            gt_keep = gt_keep & valid
+            valid_end = gt_mask[:, -1] > 0 if len(gt_mask) else np.zeros((0,), dtype=bool)
+            gt_keep = gt_keep & valid_end
+            step_mask = gt_mask[gt_keep] > 0
             gt_xy = np.asarray(gt["current"])[gt_keep]
             gt_future = np.asarray(gt["future"])[gt_keep]
             pred_keep = np.asarray(pred["labels"]) == class_id
@@ -56,14 +64,16 @@ def accumulate_forecast(predictions, ground_truth):
             pred_future = traj[pred_keep, :, 1:, :]
             bucket = per_class[name]
             bucket["gt"] += len(gt_xy)
+            bucket["pred"] += len(pred_xy)
             rows, cols = _match(pred_xy, gt_xy)
             bucket["fp"] += len(pred_xy) - len(rows)
             for row, col in zip(rows, cols):
                 error = np.linalg.norm(pred_future[row] - gt_future[col][None], axis=-1)
-                ade = error.mean(axis=-1).min()
+                valid = step_mask[col].astype(np.float64)
+                ade = (error * valid).sum(axis=-1) / max(valid.sum(), 1.0)
                 fde = error[:, future_steps - 1].min()
-                bucket["ade"] += ade
-                bucket["fde"] += fde
+                bucket["ade"] += float(ade.min())
+                bucket["fde"] += float(fde)
                 bucket["mr"] += float(fde > EPA_FDE)
                 bucket["n"] += 1
                 if fde <= EPA_FDE:
@@ -84,6 +94,8 @@ def summarize_forecast(per_class):
             "MR": bucket["mr"] / denom if bucket["n"] else None,
             "gt": bucket["gt"],
             "matched": bucket["n"],
+            "fp": bucket["fp"],
+            "pred": bucket["pred"],
         }
         if bucket["gt"] == 0:
             continue
@@ -102,6 +114,7 @@ def summarize_forecast(per_class):
         "MR": mrs / count if count else None,
         "matched": count,
         "gt": gts,
+        "fp": fps,
         "per_class": rows,
     }
     return summary

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Short joint run. The detector checkpoint stays frozen inside the trainer.
+# Ablation train. Pass --variant b, c1, c2, or c3.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$ROOT:$ROOT/third_party/MC-DeTra:$ROOT/third_party/TransFusion"

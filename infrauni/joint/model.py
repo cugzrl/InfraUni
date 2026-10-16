@@ -52,12 +52,13 @@ class IndependentForecast(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(256, modes * future * 2),
         )
+        self.mode_head = nn.Linear(in_dim, modes)
 
     def forward(self, query, center):
         batch, _, count = query.shape
-        delta = self.net(query.transpose(1, 2))
-        delta = delta.view(batch, count, self.modes, self.future, 2)
-        return center[:, :, None, None, :] + delta
+        flat = query.transpose(1, 2)
+        delta = self.net(flat).view(batch, count, self.modes, self.future, 2)
+        return center[:, :, None, None, :] + delta, self.mode_head(flat)
 
 
 def _with_current(center, future):
@@ -72,8 +73,8 @@ class JointTransFusionDeTra(nn.Module):
 
     def __init__(self, detector, mode="joint", blocks=2):
         super().__init__()
-        if mode not in {"pred_head", "joint"}:
-            raise ValueError("mode must be pred_head or joint")
+        if mode not in {"pred_head", "joint", "cv"}:
+            raise ValueError("mode must be pred_head, joint, or cv")
         self.detector = detector
         self.mode = mode
         self.modes = 6
@@ -89,6 +90,9 @@ class JointTransFusionDeTra(nn.Module):
         self.query_proj = nn.Linear(256, hidden)
         if mode == "pred_head":
             self.forecast = IndependentForecast(256, self.modes, self.future)
+            self.detra = None
+        elif mode == "cv":
+            self.forecast = None
             self.detra = None
         else:
             self.forecast = None
@@ -116,9 +120,22 @@ class JointTransFusionDeTra(nn.Module):
         for param in self.detector.parameters():
             param.requires_grad_(False)
 
+    def unfreeze_fusion(self):
+        """Train the image-query decoder and the fusion prediction head."""
+
+        head = self.detector.pts_bbox_head
+        modules = [head.decoder[1], head.prediction_heads[-1]]
+        for name in ("heatmap_head_img", "shared_conv_img", "fc"):
+            if hasattr(head, name):
+                modules.append(getattr(head, name))
+        for module in modules:
+            module.train()
+            for param in module.parameters():
+                param.requires_grad_(True)
+
     def train(self, mode=True):
         super().train(mode)
-        # Frozen detector stays in eval so its running stats do not move.
+        # Frozen weights stay in eval. Unfrozen fusion modules are set afterwards.
         self.detector.eval()
         return self
 
@@ -153,14 +170,28 @@ class JointTransFusionDeTra(nn.Module):
         layer = outs[0][0] if isinstance(outs[0], (list, tuple)) else outs[0]
         decoded = self._decode(layer)
         proposal_boxes = torch.stack([item["bboxes"] for item in decoded], dim=0)
-        proposal_scores = torch.stack([item["scores"] for item in decoded], dim=0)
-        proposal_labels = torch.stack([item["labels"] for item in decoded], dim=0)
         center = proposal_boxes[..., :2]
         detra_out = None
+        head = detector.pts_bbox_head
+        # Same gated score as TransFusionHead.get_bboxes, without dropping the query index.
+        gated = layer["heatmap"].detach().sigmoid() * layer["query_heatmap_score"].detach()
+        gated = gated * F.one_hot(head.query_labels, num_classes=gated.shape[1]).permute(0, 2, 1).float()
+        proposal_scores = gated.max(dim=1).values
+        proposal_labels = head.query_labels
         if self.mode == "pred_head":
-            future = self.forecast(query.detach(), center.detach())
+            future, mode_logits = self.forecast(query.detach(), center.detach())
             boxes = proposal_boxes
             trajectories = _with_current(center.detach(), future)
+        elif self.mode == "cv":
+            # nuScenes keyframes are 2 Hz, so each step is 0.5 s.
+            steps = torch.arange(1, self.future + 1, device=center.device, dtype=center.dtype)
+            steps = steps.view(1, 1, 1, -1, 1) * 0.5
+            velocity = proposal_boxes[..., 7:9]
+            future = center[:, :, None, None, :] + velocity[:, :, None, None, :] * steps
+            future = future.expand(-1, -1, self.modes, -1, -1)
+            boxes = proposal_boxes
+            trajectories = _with_current(center, future)
+            mode_logits = center.new_zeros(center.shape[0], center.shape[1], self.modes)
         else:
             poses = torch.stack(
                 [proposal_boxes[..., 0], proposal_boxes[..., 1], proposal_boxes[..., 6]],
@@ -175,12 +206,15 @@ class JointTransFusionDeTra(nn.Module):
             boxes = proposal_boxes.clone()
             boxes[..., :7] = detra_out["boxes"]
             trajectories = _with_current(boxes[..., :2], detra_out["future_xy"])
+            mode_logits = detra_out["mode_logits"]
         return {
             "boxes": boxes,
             "proposal_boxes": proposal_boxes,
             "scores": proposal_scores,
             "labels": proposal_labels,
             "trajectories": trajectories,
+            "mode_logits": mode_logits,
+            "query_index": torch.arange(boxes.shape[1], device=boxes.device),
             "query": query,
             "detra": detra_out,
             "outs": outs,
