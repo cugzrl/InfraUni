@@ -35,6 +35,7 @@ from infrauni.data.constants import FORECAST_SCORE, POST_CENTER_RANGE
 from infrauni.eval.protocol import accumulate_forecast, summarize_forecast
 from infrauni.joint.loss import _boxes_from_block
 from infrauni.joint.model import JointTransFusionDeTra
+from infrauni.joint.unified import UnifiedTransFusionDeTra
 from infrauni.joint.postprocess import filter_query_indices, take_queries
 from infrauni.joint.targets import match_queries
 
@@ -100,14 +101,23 @@ def main():
     else:
         checkpoint = args.checkpoint if os.path.isabs(args.checkpoint) else os.path.join(ROOT, args.checkpoint)
         saved = torch.load(checkpoint, map_location="cpu")
-        model = JointTransFusionDeTra(
-            detector,
-            mode=saved["mode"],
-            blocks=saved.get("blocks", 2),
-            box_mode=saved.get("box_mode", "full"),
-            detach_anchor=saved.get("detach_anchor", False),
-            causal_time=saved.get("causal_time", False),
-        )
+        if saved.get("arch") == "unified":
+            model = UnifiedTransFusionDeTra(
+                detector,
+                blocks=saved.get("blocks", 2),
+                detach_anchor=saved.get("detach_anchor", True),
+                causal_time=saved.get("causal_time", False),
+                forecast_weight=saved.get("forecast_weight", 1.0),
+            )
+        else:
+            model = JointTransFusionDeTra(
+                detector,
+                mode=saved["mode"],
+                blocks=saved.get("blocks", 2),
+                box_mode=saved.get("box_mode", "full"),
+                detach_anchor=saved.get("detach_anchor", False),
+                causal_time=saved.get("causal_time", False),
+            )
         current = model.state_dict()
         compatible = {
             key: value
@@ -138,9 +148,11 @@ def main():
         boxes, kept = _export(output, batch["img_metas"])
         results.append({"pts_bbox": bbox3d2result(boxes, kept["scores"], kept["labels"])})
         proposal = output["proposal_boxes"][0]
+        proposal_scores = output["proposal_scores"][0] if "proposal_scores" in output else output["scores"][0]
+        proposal_labels = output["proposal_labels"][0] if "proposal_labels" in output else output["labels"][0]
         proposal_kept = take_queries(
-            filter_query_indices(output["scores"][0], proposal, score_thresh=None, center_range=POST_CENTER_RANGE),
-            boxes=proposal, scores=output["scores"][0], labels=output["labels"][0],
+            filter_query_indices(proposal_scores, proposal, score_thresh=None, center_range=POST_CENTER_RANGE),
+            boxes=proposal, scores=proposal_scores, labels=proposal_labels,
             trajectories=output["trajectories"][0],
         )
         proposal_boxes = batch["img_metas"][0]["box_type_3d"](
@@ -148,7 +160,7 @@ def main():
         )
         proposal_results.append({"pts_bbox": bbox3d2result(proposal_boxes, proposal_kept["scores"], proposal_kept["labels"])})
         fused_scores = None
-        if output["object_logits"] is not None:
+        if output["object_logits"] is not None and not output.get("unified"):
             prob = output["object_logits"][0].sigmoid()
             # prob 0.5 leaves the TransFusion score unchanged.
             fused = output["scores"][0] * (0.5 + prob)
@@ -180,7 +192,7 @@ def main():
         if output["detra"] is not None:
             paired = take_queries(
                 filter_query_indices(output["scores"][0], output["boxes"][0], score_thresh=None, center_range=POST_CENTER_RANGE),
-                refined=output["boxes"][0], base=output["proposal_boxes"][0], labels=output["labels"][0],
+                refined=output["boxes"][0], base=output["proposal_boxes"][0], labels=proposal_labels,
             )
             diff = paired["refined"][:, :7] - paired["base"][:, :7]
             delta["dxy"] += diff[:, :2].norm(dim=-1).sum().item()
@@ -201,9 +213,9 @@ def main():
                     delta["err_before"] += before.sum().item()
                     delta["err_after"] += after.sum().item()
                     delta["matched"] += int(ok.sum())
-                anchor = match_queries(output["proposal_boxes"][0, :, :2], output["labels"][0], gt_xy, gt_lab)
+                anchor = match_queries(output["proposal_boxes"][0, :, :2], proposal_labels, gt_xy, gt_lab)
                 for block in output["detra"]["aux_outputs"]:
-                    alt = match_queries(_boxes_from_block(block)[:, :2], output["labels"][0], gt_xy, gt_lab)
+                    alt = match_queries(_boxes_from_block(block)[:, :2], proposal_labels, gt_xy, gt_lab)
                     both = (anchor >= 0) & (alt >= 0)
                     delta["switch_compared"] += int(both.sum())
                     if bool(both.any()):

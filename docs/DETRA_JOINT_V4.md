@@ -22,7 +22,7 @@ checkpoint 现在保存模型、优化器、`global_step`、epoch、PyTorch / CU
 
 ## 诊断和第 5、10、15 epoch 对照
 
-诊断从有限的 F0 `epoch_5.pt` 接着训第 6 个 epoch，总日程仍按 15 epoch 计算学习率。第 1620 步时两组学习率约为 `6.69e-5` 和 `6.99e-6`，`loss_det` 0.649，`loss_forecast` 2.520，官方检测损失 0.476。到第 1700 步损失仍有限，`loss_det` 0.411，`loss_forecast` 1.997，切换率 0。工作目录是 `experiments/ablation_f0_diag_mini`。这一轮还在跑。一旦出现非有限梯度，结果只保留 `nonfinite.json`，不覆盖原来的 `epoch_5.pt`。
+诊断从有限的 F0 `epoch_5.pt` 接着训完第 6 个 epoch，总日程仍按 15 epoch 计算学习率。优化器是重新初始化的，因为旧 checkpoint 没有 Adam 状态。第 1938 步结束时损失保持有限，`experiments/ablation_f0_diag_mini/epoch_6.pt` 中 0 个非有限张量，并带有优化器和随机数状态。因此，只把学习率设回 `1e-5`、从第 5 个 epoch 的权重重开 Adam，并不会立刻复现当初的 NaN。当初的非有限值出现在连续 Adam 动量已经积累之后。旧的 `epoch_6.pt` 和 `epoch_15.pt` 仍然作废。架构改成统一解码之后，没有继续把这条旧 F0 训到 15 epoch。
 
 稳定复训使用检测学习率 `1e-6`、检测梯度裁剪 0.5，从同一份 LC `epoch_1.pth` 重新开始，写到 `experiments/ablation_f0_stable_mini`。B 用同一数据顺序和种子重新训 15 epoch，写到 `experiments/ablation_b_long_mini`，避免覆盖原来只有 2 epoch 的 B。D1 已有同协议的 5、10、15 epoch 曲线，检测始终是 mAP 0.5300、NDS 0.5080。它在第 5 个 epoch 恢复时重置过 Adam，第 6 到第 15 epoch 的预测仍在变好。
 

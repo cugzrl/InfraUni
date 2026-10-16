@@ -1,0 +1,20 @@
+--- a/mmdet3d/models/dense_heads/transfusion_head.py
++++ b/mmdet3d/models/dense_heads/transfusion_head.py
+@@
+         if self.auxiliary is False:
+             # only return the results of last decoder layer
++            if self.fuse_img:
++                ret_dicts[-1]['fused_query'] = torch.cat([query_feat, prev_query_feat], dim=1)
+             return [ret_dicts[-1]]
+ 
+         # return all the layer's results for auxiliary superivison
+         new_res = {}
+         for key in ret_dicts[0].keys():
+-            if key not in ['dense_heatmap', 'dense_heatmap_old', 'query_heatmap_score']:
++            if key not in ['dense_heatmap', 'dense_heatmap_old', 'query_heatmap_score', 'fused_query']:
+                 new_res[key] = torch.cat([ret_dict[key] for ret_dict in ret_dicts], dim=-1)
+             else:
+                 new_res[key] = ret_dicts[0][key]
++        if self.fuse_img:
++            new_res['fused_query'] = torch.cat([query_feat, prev_query_feat], dim=1)
+         return [new_res]

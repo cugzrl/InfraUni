@@ -191,6 +191,95 @@ def _boxes_from_block(pred):
     return box
 
 
+def candidate_quality(proposal_xy, proposal_labels, final_xy, gt_xy, gt_labels, limit=2.0):
+    """GT recall of the initial candidates, plus center error before and after DeTra."""
+
+    if gt_xy.shape[0] == 0:
+        return {"proposal_recall": 1.0, "proposal_center": 0.0, "final_center": 0.0}
+    hits = 0
+    proposal_err = []
+    final_err = []
+    for index in range(gt_xy.shape[0]):
+        same = proposal_labels == gt_labels[index]
+        if not bool(same.any()):
+            continue
+        distance = torch.linalg.norm(proposal_xy[same] - gt_xy[index], dim=-1)
+        nearest = int(distance.argmin())
+        chosen = torch.arange(proposal_xy.shape[0], device=proposal_xy.device)[same][nearest]
+        if float(distance[nearest]) > limit:
+            continue
+        hits += 1
+        proposal_err.append(distance[nearest])
+        final_err.append(torch.linalg.norm(final_xy[chosen] - gt_xy[index], dim=-1))
+    if not proposal_err:
+        return {"proposal_recall": 0.0, "proposal_center": 0.0, "final_center": 0.0}
+    return {
+        "proposal_recall": hits / float(gt_xy.shape[0]),
+        "proposal_center": float(torch.stack(proposal_err).mean()),
+        "final_center": float(torch.stack(final_err).mean()),
+    }
+
+
+def compute_unified_loss(output, gt_boxes, gt_labels, track, gt_velocity=None):
+    """Supervise DeTra's class, box, and forecast on one candidate assignment.
+
+    The assignment uses the TransFusion candidate. Later blocks keep it.
+    Forecast waypoints are offsets from a detached current center, so the
+    forecast loss does not move that center. The detection loss still does.
+    """
+
+    proposal = output["proposal_boxes"][0]
+    labels = output["proposal_labels"][0]
+    matched = match_queries(proposal[:, :2], labels, gt_boxes[:, :2], gt_labels)
+    future, mask = attach_future(matched, gt_boxes[:, :2], gt_labels, track)
+    targets = (matched >= 0).float()
+    outputs = output["detra"]["aux_outputs"]
+    det_total = proposal.sum() * 0.0
+    fore_total = proposal.sum() * 0.0
+    for block_pred in outputs:
+        refined = _boxes_from_block(block_pred)
+        pred = _detach_forecast_origin(block_pred) if output.get("detach_anchor", True) else block_pred
+        class_logits = block_pred["class_logits"]
+        object_logits = block_pred["object_logits"]
+        if class_logits.ndim == 3:
+            class_logits = class_logits[0]
+        if object_logits.ndim == 2:
+            object_logits = object_logits[0]
+        det = detection_loss(refined, class_logits, object_logits, matched, gt_boxes[:, :7], gt_labels)
+        if gt_velocity is not None and "pred_velocity" in block_pred and bool(targets.any()):
+            velocity = block_pred["pred_velocity"]
+            if velocity.ndim == 3:
+                velocity = velocity[0]
+            assigned = matched >= 0
+            gt_v = gt_velocity[matched[assigned]]
+            finite = torch.isfinite(gt_v).all(dim=-1)
+            if bool(finite.any()):
+                det["loss_det"] = det["loss_det"] + F.smooth_l1_loss(
+                    velocity[assigned][finite], gt_v[finite]
+                )
+        det_total = det_total + det["loss_det"]
+        fore_total = fore_total + forecast_bundle(pred, *_as_batch(future, mask, targets))
+    scale = float(len(outputs))
+    weight = float(output.get("forecast_weight", 1.0))
+    with torch.no_grad():
+        quality = candidate_quality(
+            proposal[:, :2],
+            labels,
+            output["boxes"][0, :, :2],
+            gt_boxes[:, :2],
+            gt_labels,
+        )
+    return {
+        "loss_det": det_total / scale,
+        "loss_forecast": fore_total / scale * weight,
+        "matched": int(targets.sum()),
+        "switch_rate": 0.0,
+        "proposal_recall": quality["proposal_recall"],
+        "proposal_center": quality["proposal_center"],
+        "final_center": quality["final_center"],
+    }
+
+
 def apply_backward(model, losses, feedback):
     """Backprop detection and forecast losses.
 

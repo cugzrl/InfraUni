@@ -30,8 +30,9 @@ from mmcv.runner import load_checkpoint
 from mmdet3d.datasets import build_dataset
 from mmdet3d.models import build_detector
 
-from infrauni.joint.loss import apply_backward, compute_joint_loss
+from infrauni.joint.loss import apply_backward, compute_joint_loss, compute_unified_loss
 from infrauni.joint.model import JointTransFusionDeTra
+from infrauni.joint.unified import UnifiedTransFusionDeTra
 from infrauni.joint.poses import load_pose_index
 from infrauni.joint.stability import (
     backup_trainable,
@@ -68,10 +69,16 @@ VARIANTS = {
     "s_forecast": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "none", "detach_anchor": True, "causal_time": False, "memory": "forecast"},
     "s_both": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "none", "detach_anchor": True, "causal_time": False, "memory": "both"},
     "s_reliable": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "none", "detach_anchor": True, "causal_time": False, "memory": "reliable"},
+    # Unified DeTra decoder. TransFusion boxes are candidates only.
+    "u0": {"arch": "unified", "mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "full", "detach_anchor": True, "causal_time": False, "forecast_weight": 1.0},
+    "u_nofore": {"arch": "unified", "mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "full", "detach_anchor": True, "causal_time": False, "forecast_weight": 0.0},
+    "u_causal": {"arch": "unified", "mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "full", "detach_anchor": True, "causal_time": True, "forecast_weight": 1.0},
 }
 
 for _spec in VARIANTS.values():
     _spec.setdefault("memory", "none")
+    _spec.setdefault("arch", "series")
+    _spec.setdefault("forecast_weight", 1.0)
 
 
 class EpochOrder(Sampler):
@@ -243,15 +250,24 @@ def main():
     dataset = build_dataset(train_cfg)
     detector = build_detector(cfg.model, train_cfg=cfg.get("train_cfg"), test_cfg=cfg.get("test_cfg"))
     load_checkpoint(detector, LC_CHECKPOINT, map_location="cpu")
-    model = JointTransFusionDeTra(
-        detector,
-        mode=spec["mode"],
-        blocks=2,
-        box_mode=spec["box_mode"],
-        detach_anchor=spec["detach_anchor"],
-        causal_time=spec["causal_time"],
-        memory_mode=spec["memory"],
-    )
+    if spec["arch"] == "unified":
+        model = UnifiedTransFusionDeTra(
+            detector,
+            blocks=2,
+            detach_anchor=spec["detach_anchor"],
+            causal_time=spec["causal_time"],
+            forecast_weight=spec["forecast_weight"],
+        )
+    else:
+        model = JointTransFusionDeTra(
+            detector,
+            mode=spec["mode"],
+            blocks=2,
+            box_mode=spec["box_mode"],
+            detach_anchor=spec["detach_anchor"],
+            causal_time=spec["causal_time"],
+            memory_mode=spec["memory"],
+        )
     model.freeze_detector()
     start_epoch = 0
     if args.resume:
@@ -338,7 +354,9 @@ def main():
                 base = group["initial_lr"]
                 group["lr"] = base * (1.0 - progress) + 1e-6 * progress
             token = batch["img_metas"][0]["sample_idx"]
-            gt_boxes = batch["gt_bboxes_3d"][0].tensor.to(batch["img"].device)
+            full_gt = batch["gt_bboxes_3d"][0].tensor.to(batch["img"].device)
+            gt_boxes = full_gt[:, :7]
+            gt_velocity = full_gt[:, 7:9] if full_gt.shape[-1] >= 9 else None
             gt_labels = batch["gt_labels_3d"][0].to(gt_boxes.device).long()
             optimizer.zero_grad(set_to_none=True)
             if poses is not None:
@@ -365,8 +383,13 @@ def main():
                     atol=1e-4,
                 )
                 print("current_box_matches_trajectory", bool(same), "queries", output["boxes"].shape[1], flush=True)
-            losses = compute_joint_loss(output, gt_boxes[:, :7], gt_labels, tracks[token])
-            use_official = spec["unfreeze"] or spec["memory"] != "none"
+            if spec["arch"] == "unified":
+                losses = compute_unified_loss(
+                    output, gt_boxes[:, :7], gt_labels, tracks[token], gt_velocity
+                )
+            else:
+                losses = compute_joint_loss(output, gt_boxes[:, :7], gt_labels, tracks[token])
+            use_official = spec["arch"] != "unified" and (spec["unfreeze"] or spec["memory"] != "none")
             if use_official:
                 if not _finite_tree(output["outs"]):
                     _halt(log, work, "nonfinite_outputs", epoch, global_step, "detection outputs", model, optimizer, losses)
@@ -384,6 +407,17 @@ def main():
             if not (torch.isfinite(losses["loss_det"]) and torch.isfinite(losses["loss_forecast"])):
                 _halt(log, work, "nonfinite_loss", epoch, global_step, "joint loss", model, optimizer, losses)
                 return
+            if spec["arch"] == "unified" and global_step == 1:
+                probe_tokens = ("box_head", "class_head", "object_head", "query_proj", "time_attn", "future_head")
+                losses["loss_det"].backward(retain_graph=True)
+                det_probe = grad_norms(model, probe_tokens)
+                optimizer.zero_grad(set_to_none=True)
+                losses["loss_forecast"].backward(retain_graph=True)
+                fore_probe = grad_norms(model, probe_tokens)
+                optimizer.zero_grad(set_to_none=True)
+                print("det_grads", {key: round(value, 5) for key, value in det_probe.items()}, flush=True)
+                print("forecast_grads", {key: round(value, 5) for key, value in fore_probe.items()}, flush=True)
+                log.write("det_grads %s\nforecast_grads %s\n" % (det_probe, fore_probe))
             saved = backup_trainable(model)
             apply_backward(model, losses, feedback=spec["feedback"])
             bad_grad = first_nonfinite_grad(model)
@@ -445,6 +479,10 @@ def main():
                 )
                 if "loss_official" in losses:
                     message += " loss_official %.4f" % float(losses["loss_official"])
+                if "proposal_recall" in losses:
+                    message += " recall %.3f center %.3f -> %.3f" % (
+                        losses["proposal_recall"], losses["proposal_center"], losses["final_center"]
+                    )
                 print(message, flush=True)
                 log.write(message + "\n")
                 log.flush()
@@ -463,6 +501,8 @@ def main():
                 "detach_anchor": spec["detach_anchor"],
                 "causal_time": spec["causal_time"],
                 "memory": spec["memory"],
+                "arch": spec["arch"],
+                "forecast_weight": spec["forecast_weight"],
                 "global_step": global_step,
                 "optimizer": optimizer.state_dict(),
                 "rng": _rng_state(),

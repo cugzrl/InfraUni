@@ -1,6 +1,6 @@
 # InfraUni
 
-面向固定路侧场景的 LiDAR-Camera 3D 检测与轨迹预测。当前检测基线是官方 TransFusion，轨迹部分复用 MC-DeTra 的修正模块。记录见 `docs/TRANSFUSION_REPRODUCTION.md`、`docs/DETRA_JOINT.md`、`docs/DETRA_JOINT_V2.md`、`docs/DETRA_JOINT_V3.md` 和 `docs/DETRA_JOINT_V4.md`。跨帧记忆见 `docs/FORESIGHT_STREAMING.md`，路侧数据见 `docs/RESOLVE_ADAPTATION.md`。
+面向固定路侧场景的 LiDAR-Camera 3D 检测与轨迹预测。当前检测基线是官方 TransFusion，轨迹部分复用 MC-DeTra 的修正模块。记录见 `docs/TRANSFUSION_REPRODUCTION.md`、`docs/DETRA_JOINT.md`、`docs/DETRA_JOINT_V2.md`、`docs/DETRA_JOINT_V3.md` 和 `docs/DETRA_JOINT_V4.md`。跨帧记忆见 `docs/FORESIGHT_STREAMING.md`，统一解码见 `docs/DETRA_UNIFIED.md`，路侧数据见 `docs/RESOLVE_ADAPTATION.md`。
 
 ```bash
 cd /home/kemove/devdata1/zrl/InfraUni
