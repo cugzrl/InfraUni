@@ -14,6 +14,8 @@ import torch.nn.functional as F
 from detra_repro.config import DataConfig, ModelConfig
 from detra_repro.models.refinement import DeTraMini
 
+from .memory import MotionPrior, QueryBank
+
 
 class QueryDeTra(DeTraMini):
     """DeTraMini plus one object embedding taken from the detector query."""
@@ -71,7 +73,7 @@ def _with_current(center, future):
 class JointTransFusionDeTra(nn.Module):
     """Official detector plus either an independent head or DeTra refinement."""
 
-    def __init__(self, detector, mode="joint", blocks=2, box_mode="full", detach_anchor=False, causal_time=False):
+    def __init__(self, detector, mode="joint", blocks=2, box_mode="full", detach_anchor=False, causal_time=False, memory_mode="none"):
         super().__init__()
         if mode not in {"pred_head", "joint", "cv"}:
             raise ValueError("mode must be pred_head, joint, or cv")
@@ -80,6 +82,10 @@ class JointTransFusionDeTra(nn.Module):
         self.box_mode = box_mode
         self.detach_anchor = detach_anchor
         self.causal_time = causal_time
+        self.memory_mode = memory_mode
+        self.prior = MotionPrior(256) if memory_mode != "none" else None
+        self.bank = QueryBank() if memory_mode != "none" else None
+        self._memory = None
         self.modes = 6
         self.future = 12
         self.data_cfg = DataConfig(
@@ -116,10 +122,98 @@ class JointTransFusionDeTra(nn.Module):
                 for block in self.detra.blocks:
                     block.causal_time = True
         self._captured = {}
-        detector.pts_bbox_head.prediction_heads[-1].register_forward_hook(self._capture_query)
+        self._query_for_detra = None
+        head = detector.pts_bbox_head.prediction_heads[-1]
+        self._detection_forward = head.forward
+        head.forward = self._forward_detection
+        head.register_forward_hook(self._capture_query)
+        self._lidar_query_pos = None
+        if memory_mode != "none":
+            detector.pts_bbox_head.decoder[0].register_forward_hook(self._capture_lidar_pos)
+
+    def _capture_lidar_pos(self, module, inputs, output):
+        if len(inputs) >= 3 and torch.is_tensor(inputs[2]):
+            self._lidar_query_pos = inputs[2].detach()
+
+    def _query_xy_meters(self, count, reference):
+        """Heatmap proposal locations, in the same lidar meters as the memory."""
+
+        pos = self._lidar_query_pos
+        if pos is None or pos.shape[1] != count:
+            return reference.new_zeros(count, 2)
+        head = self.detector.pts_bbox_head
+        coder = head.bbox_coder
+        voxel = coder.voxel_size
+        factor = coder.out_size_factor
+        pc = coder.pc_range
+        xy = pos[0].to(device=reference.device, dtype=reference.dtype)
+        return torch.stack(
+            (
+                xy[:, 0] * factor * voxel[0] + pc[0],
+                xy[:, 1] * factor * voxel[1] + pc[1],
+            ),
+            dim=-1,
+        )
+
+    def _apply_prior(self, query_feat):
+        if self.memory_mode == "none" or self._memory is None or self.prior is None:
+            return query_feat
+        count = query_feat.shape[-1]
+        query_xy = self._query_xy_meters(count, query_feat)
+        return self.prior(
+            query_feat,
+            self._memory["features"],
+            self._memory["xy"],
+            query_xy,
+            self._memory["reliability"],
+        )
+
+    def set_frame(self, scene, timestamp, lidar_to_global):
+        """Load priors from earlier frames. An empty bank leaves detection unchanged."""
+
+        self._query_for_detra = None
+        self._memory = None
+        self._frame = {
+            "scene": scene,
+            "timestamp": timestamp,
+            "lidar_to_global": lidar_to_global,
+        }
+        if self.memory_mode == "none" or self.bank is None:
+            return
+        reliable = self.memory_mode == "reliable"
+        mode = "both" if reliable else self.memory_mode
+        self._memory = self.bank.recall(mode, timestamp, lidar_to_global, reliable)
+
+    def store_frame(self, boxes, scores, labels, trajectories, features):
+        if self.memory_mode == "none" or not hasattr(self, "_frame"):
+            return
+        frame = self._frame
+        self.bank.observe(
+            frame["scene"],
+            frame["timestamp"],
+            frame["lidar_to_global"],
+            features.detach(),
+            boxes.detach(),
+            scores.detach(),
+            labels.detach(),
+            trajectories.detach(),
+        )
+
+    def _forward_detection(self, query_feat):
+        if self.memory_mode == "none" or self._memory is None:
+            self._query_for_detra = None
+            return self._detection_forward(query_feat)
+        updated = self._apply_prior(query_feat)
+        # Forecast reads these features, but the trajectory loss does not train
+        # the prior. Detection loss is what teaches the residual.
+        self._query_for_detra = updated.detach()
+        return self._detection_forward(updated)
 
     def _capture_query(self, module, inputs, output):
-        self._captured["query"] = inputs[0]
+        if self._query_for_detra is not None:
+            self._captured["query"] = self._query_for_detra
+        else:
+            self._captured["query"] = inputs[0]
 
     def freeze_detector(self):
         self.detector.eval()

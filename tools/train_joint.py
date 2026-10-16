@@ -9,6 +9,7 @@ import argparse
 import logging
 import os
 import pickle
+import random
 import sys
 import time
 
@@ -31,6 +32,16 @@ from mmdet3d.models import build_detector
 
 from infrauni.joint.loss import apply_backward, compute_joint_loss
 from infrauni.joint.model import JointTransFusionDeTra
+from infrauni.joint.poses import load_pose_index
+from infrauni.joint.stability import (
+    backup_trainable,
+    first_nonfinite_grad,
+    first_nonfinite_param,
+    grad_norms,
+    optimizer_to,
+    restore_trainable,
+    write_failure,
+)
 
 logging.getLogger("mmcv").setLevel(logging.ERROR)
 
@@ -51,8 +62,16 @@ VARIANTS = {
     # Shared features stay coupled, but the forecast loss does not drag the center.
     "d5": {"mode": "joint", "unfreeze": True, "feedback": True, "box_mode": "full", "detach_anchor": True, "causal_time": False},
     # Future queries cannot update the current detection query. Backward grads stay on.
-    "f0": {"mode": "joint", "unfreeze": True, "feedback": True, "box_mode": "full", "detach_anchor": False, "causal_time": True},
+    "f0": {"mode": "joint", "unfreeze": True, "feedback": True, "box_mode": "full", "detach_anchor": False, "causal_time": True, "memory": "none"},
+    # Streaming priors. The detector stays frozen. Only the residual prior is new.
+    "s_det": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "none", "detach_anchor": True, "causal_time": False, "memory": "det"},
+    "s_forecast": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "none", "detach_anchor": True, "causal_time": False, "memory": "forecast"},
+    "s_both": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "none", "detach_anchor": True, "causal_time": False, "memory": "both"},
+    "s_reliable": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "none", "detach_anchor": True, "causal_time": False, "memory": "reliable"},
 }
+
+for _spec in VARIANTS.values():
+    _spec.setdefault("memory", "none")
 
 
 class EpochOrder(Sampler):
@@ -150,6 +169,48 @@ def _official_loss(model, output, batch):
     return sum(terms)
 
 
+def _rng_state():
+    return {
+        "torch": torch.get_rng_state(),
+        "numpy": np.random.get_state(),
+        "python": random.getstate(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+
+def _halt(log, work, reason, epoch, step, detail, model, optimizer, losses):
+    """Record the first bad step and leave the weights unchanged."""
+
+    payload = {
+        "reason": reason,
+        "epoch": epoch,
+        "step": step,
+        "detail": str(detail),
+        "parameter": first_nonfinite_param(model),
+        "gradient": first_nonfinite_grad(model),
+        "grad_norms": grad_norms(
+            model, ("decoder.1", "prediction_heads", "box_head", "future_head", "future_gru", "prior.")
+        ),
+        "learning_rates": [group["lr"] for group in optimizer.param_groups],
+        "losses": {},
+    }
+    if losses is not None:
+        for key, value in losses.items():
+            if torch.is_tensor(value):
+                payload["losses"][key] = None if not torch.isfinite(value) else float(value.detach())
+            else:
+                payload["losses"][key] = value
+    path = os.path.join(work, "nonfinite.json")
+    write_failure(path, payload)
+    message = "halt %s epoch %d step %d grad %s param %s" % (
+        reason, epoch, step, payload["gradient"], payload["parameter"]
+    )
+    print(message, payload["grad_norms"], payload["learning_rates"], flush=True)
+    log.write(message + "\n")
+    log.flush()
+    raise SystemExit(2)
+
+
 def _trainable(model):
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
 
@@ -159,10 +220,16 @@ def main():
     parser.add_argument("--variant", required=True, choices=sorted(VARIANTS))
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=0)
-    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--eval-every", type=int, default=0)
     parser.add_argument("--resume", default="")
+    parser.add_argument("--detector-lr", type=float, default=1e-6)
+    parser.add_argument("--detector-clip", type=float, default=0.5)
+    parser.add_argument("--module-lr", type=float, default=1e-4)
+    parser.add_argument("--ordered", action="store_true")
+    parser.add_argument("--work-dir", default="")
+    parser.add_argument("--stop-epoch", type=int, default=0)
     args = parser.parse_args()
     logging.disable(logging.INFO)
     spec = VARIANTS[args.variant]
@@ -183,6 +250,7 @@ def main():
         box_mode=spec["box_mode"],
         detach_anchor=spec["detach_anchor"],
         causal_time=spec["causal_time"],
+        memory_mode=spec["memory"],
     )
     model.freeze_detector()
     start_epoch = 0
@@ -207,11 +275,17 @@ def main():
         else:
             new_params.append(param)
     if new_params:
-        groups.append({"params": new_params, "lr": 1e-4})
+        groups.append({"params": new_params, "lr": args.module_lr, "initial_lr": args.module_lr})
     if detector_params:
-        groups.append({"params": detector_params, "lr": 1e-5})
+        groups.append({"params": detector_params, "lr": args.detector_lr, "initial_lr": args.detector_lr})
     optimizer = torch.optim.AdamW(groups, weight_decay=0.01)
-    work = os.path.join(ROOT, "experiments", "ablation_%s_mini" % args.variant)
+    if args.resume and "optimizer" in resumed:
+        optimizer.load_state_dict(resumed["optimizer"])
+        if torch.cuda.is_available():
+            optimizer_to(optimizer, "cuda")
+    work = args.work_dir or os.path.join(ROOT, "experiments", "ablation_%s_mini" % args.variant)
+    if not os.path.isabs(work):
+        work = os.path.join(ROOT, work)
     os.makedirs(work, exist_ok=True)
     tracks = pickle.load(open(os.path.join(ROOT, "data", "nuscenes_mini_future12.pkl"), "rb"))
     log = open(os.path.join(work, "train.log"), "a")
@@ -226,10 +300,27 @@ def main():
         flush=True,
     )
     log.write("trainable %d frames %d\n" % (_trainable(model), len(dataset)))
+    info_dir = os.path.join(ROOT, "third_party", "TransFusion", "data", "nuscenes")
+    poses = load_pose_index(
+        [
+            os.path.join(info_dir, "nuscenes_infos_train.pkl"),
+            os.path.join(info_dir, "nuscenes_infos_val.pkl"),
+        ],
+        sample_table="/home/kemove/devdata1/zrl/bevfusion/data/nuscenes/v1.0-mini/sample.json",
+    ) if spec["memory"] != "none" else None
+    if args.resume and resumed.get("rng"):
+        torch.set_rng_state(resumed["rng"]["torch"])
+        np.random.set_state(resumed["rng"]["numpy"])
+        random.setstate(resumed["rng"]["python"])
+        if resumed["rng"].get("cuda") and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(resumed["rng"]["cuda"])
     started = time.perf_counter()
-    global_step = start_epoch * len(dataset)
+    global_step = int(resumed["global_step"]) if args.resume and "global_step" in resumed else start_epoch * len(dataset)
     for epoch in range(start_epoch, args.epochs):
-        order = np.random.RandomState(args.seed + epoch).permutation(len(dataset))
+        if args.ordered:
+            order = np.arange(len(dataset))
+        else:
+            order = np.random.RandomState(args.seed + epoch).permutation(len(dataset))
         if args.max_steps:
             order = order[: args.max_steps]
         loader = DataLoader(
@@ -243,22 +334,30 @@ def main():
         for batch in loader:
             global_step += 1
             progress = min(global_step / max(total_steps, 1), 1.0)
-            for group, base in zip(optimizer.param_groups, (1e-4, 1e-5)[: len(optimizer.param_groups)]):
+            for group in optimizer.param_groups:
+                base = group["initial_lr"]
                 group["lr"] = base * (1.0 - progress) + 1e-6 * progress
             token = batch["img_metas"][0]["sample_idx"]
             gt_boxes = batch["gt_bboxes_3d"][0].tensor.to(batch["img"].device)
             gt_labels = batch["gt_labels_3d"][0].to(gt_boxes.device).long()
             optimizer.zero_grad(set_to_none=True)
+            if poses is not None:
+                meta = poses.get(token)
+                if meta is None:
+                    model.set_frame(token, 0.0, np.eye(4))
+                else:
+                    model.set_frame(meta["scene"], meta["timestamp"], meta["lidar_to_global"])
             try:
                 output = model(points=batch["points"], img=batch["img"], img_metas=batch["img_metas"])
             except RuntimeError as exc:
                 if "out of memory" not in str(exc):
                     raise
                 torch.cuda.empty_cache()
-                print("skip oom step", global_step, flush=True)
-                log.write("skip oom step %d\n" % global_step)
-                optimizer.zero_grad(set_to_none=True)
-                continue
+                try:
+                    output = model(points=batch["points"], img=batch["img"], img_metas=batch["img_metas"])
+                except RuntimeError as again:
+                    _halt(log, work, "cuda_oom", epoch, global_step, again, model, optimizer, None)
+                    return
             if global_step == 1:
                 same = torch.allclose(
                     output["boxes"][0, :, :2],
@@ -267,32 +366,58 @@ def main():
                 )
                 print("current_box_matches_trajectory", bool(same), "queries", output["boxes"].shape[1], flush=True)
             losses = compute_joint_loss(output, gt_boxes[:, :7], gt_labels, tracks[token])
-            if spec["unfreeze"]:
+            use_official = spec["unfreeze"] or spec["memory"] != "none"
+            if use_official:
+                if not _finite_tree(output["outs"]):
+                    _halt(log, work, "nonfinite_outputs", epoch, global_step, "detection outputs", model, optimizer, losses)
+                    return
                 try:
-                    if not _finite_tree(output["outs"]):
-                        raise ValueError("non-finite detection outputs")
                     official = _official_loss(model, output, batch)
-                    if not torch.isfinite(official):
-                        raise ValueError("non-finite official loss")
-                    losses["loss_det"] = losses["loss_det"] + official
-                    losses["loss_official"] = official.detach()
                 except ValueError as exc:
-                    print("skip official step", global_step, exc, flush=True)
-                    log.write("skip official step %d %s\n" % (global_step, exc))
-                    optimizer.zero_grad(set_to_none=True)
-                    continue
-            finite = torch.isfinite(losses["loss_det"]) and torch.isfinite(losses["loss_forecast"])
-            if not finite:
-                print("skip non-finite step", global_step, flush=True)
-                log.write("skip non-finite step %d\n" % global_step)
-                optimizer.zero_grad(set_to_none=True)
-                continue
+                    _halt(log, work, "official_assigner", epoch, global_step, exc, model, optimizer, losses)
+                    return
+                if not torch.isfinite(official):
+                    _halt(log, work, "nonfinite_official_loss", epoch, global_step, official, model, optimizer, losses)
+                    return
+                losses["loss_det"] = losses["loss_det"] + official
+                losses["loss_official"] = official.detach()
+            if not (torch.isfinite(losses["loss_det"]) and torch.isfinite(losses["loss_forecast"])):
+                _halt(log, work, "nonfinite_loss", epoch, global_step, "joint loss", model, optimizer, losses)
+                return
+            saved = backup_trainable(model)
             apply_backward(model, losses, feedback=spec["feedback"])
-            torch.nn.utils.clip_grad_norm_(
-                [param for param in model.parameters() if param.requires_grad and param.grad is not None],
-                1.0,
-            )
+            bad_grad = first_nonfinite_grad(model)
+            if bad_grad is not None:
+                restore_trainable(model, saved)
+                _halt(log, work, "nonfinite_gradient", epoch, global_step, bad_grad, model, optimizer, losses)
+                return
+            detector_grads = []
+            module_grads = []
+            for name, param in model.named_parameters():
+                if param.grad is None:
+                    continue
+                if name.startswith("detector."):
+                    detector_grads.append(param)
+                else:
+                    module_grads.append(param)
+            if detector_grads:
+                torch.nn.utils.clip_grad_norm_(detector_grads, args.detector_clip)
+            if module_grads:
+                torch.nn.utils.clip_grad_norm_(module_grads, 1.0)
             optimizer.step()
+            bad_param = first_nonfinite_param(model)
+            if bad_param is not None:
+                restore_trainable(model, saved)
+                _halt(log, work, "nonfinite_parameter", epoch, global_step, bad_param, model, optimizer, losses)
+                return
+            if spec["memory"] != "none":
+                model.store_frame(
+                    output["boxes"][0],
+                    output["scores"][0],
+                    output["labels"][0],
+                    output["trajectories"][0],
+                    output["query"][0].transpose(0, 1),
+                )
             if global_step == 1 and torch.cuda.is_available():
                 print(
                     "gpu_memory_mb",
@@ -305,13 +430,14 @@ def main():
                 for name, param in model.named_parameters():
                     if param.grad is None:
                         continue
-                    for token in ("forecast.", "future_head", "future_gru", "box_head", "decoder.1", "prediction_heads"):
-                        if token in name:
-                            grads[token] = grads.get(token, 0.0) + float(param.grad.detach().norm())
+                    for marker in ("forecast.", "future_head", "future_gru", "box_head", "decoder.1", "prediction_heads", "prior."):
+                        if marker in name:
+                            grads[marker] = grads.get(marker, 0.0) + float(param.grad.detach().norm())
                 print("grad_norms", {key: round(value, 5) for key, value in grads.items()}, flush=True)
             if global_step == 1 or global_step % 20 == 0:
-                message = "epoch %d step %d loss_det %.4f loss_forecast %.4f matched %d switch %.3f" % (
-                    epoch, global_step,
+                lrs = ",".join("%.2e" % group["lr"] for group in optimizer.param_groups)
+                message = "epoch %d step %d lr %s loss_det %.4f loss_forecast %.4f matched %d switch %.3f" % (
+                    epoch, global_step, lrs,
                     float(losses["loss_det"].detach()),
                     float(losses["loss_forecast"].detach()),
                     losses["matched"],
@@ -336,6 +462,13 @@ def main():
                 "box_mode": spec["box_mode"],
                 "detach_anchor": spec["detach_anchor"],
                 "causal_time": spec["causal_time"],
+                "memory": spec["memory"],
+                "global_step": global_step,
+                "optimizer": optimizer.state_dict(),
+                "rng": _rng_state(),
+                "detector_lr": args.detector_lr,
+                "module_lr": args.module_lr,
+                "finite": True,
             },
             os.path.join(work, "epoch_%d.pt" % (epoch + 1)),
         )
@@ -343,6 +476,7 @@ def main():
             import subprocess
             # The val process loads a second copy. Move this one off the GPU first.
             model.cpu()
+            optimizer_to(optimizer, "cpu")
             torch.cuda.empty_cache()
             evaluated = subprocess.run(
                 [
@@ -357,10 +491,13 @@ def main():
             print("eval_exit", epoch + 1, evaluated.returncode, flush=True)
             if torch.cuda.is_available():
                 model.cuda()
+                optimizer_to(optimizer, "cuda")
             model.train()
             if spec["unfreeze"]:
                 model.unfreeze_fusion()
         if args.max_steps and global_step >= args.max_steps:
+            break
+        if args.stop_epoch and epoch + 1 >= args.stop_epoch:
             break
     elapsed = time.perf_counter() - started
     log.write("seconds %.1f\n" % elapsed)
