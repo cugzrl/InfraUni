@@ -1,3 +1,4 @@
-from .detector import InfraUniDetector
+"""Detection backbones live in third_party/TransFusion.
 
-__all__ = ["InfraUniDetector"]
+Joint refinement lives in infrauni.joint and calls MC-DeTra unchanged.
+"""

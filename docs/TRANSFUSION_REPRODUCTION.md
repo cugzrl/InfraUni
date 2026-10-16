@@ -171,8 +171,21 @@ bash scripts/test_transfusion_lc.sh experiments/transfusion_voxel_LC_mini/epoch_
 
 验证集第 0、10、20 帧上，分数高于 0.1 的预测框中心到最近 LiDAR 点的中位距离分别是 0.081 m、0.063 m 和 0.096 m。BEV 图在 `experiments/transfusion_voxel_LC_mini/vis/`。
 
+## 同一权重来源的 L / LC 对照
+
+`checkpoints/transfusion_L_from_fusion.pth` 只保留转换后合并权重里的 306 个 `pts_*` tensor。官方 TransFusion-L 加载结果是 missing 0、unexpected 0。没有再训练，直接在 `mini_val` 上用 `tools/test.py` 评估。LC 仍是此前从同一份权重出发、冻结 LiDAR 和图像主干后训练 1 个 epoch 的 `experiments/transfusion_voxel_LC_mini/epoch_1.pth`。
+
+| 模型 | mAP | NDS | mASE | mAOE | mAVE | car AP |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| TransFusion-L，合并权重中的 LiDAR 部分 | 0.549 | 0.572 | 0.445 | 0.471 | 0.411 | 0.912 |
+| TransFusion-LC，1 个 mini epoch | 0.530 | 0.508 | 0.507 | 0.509 | 0.667 | 0.908 |
+
+分数高于 0.1 的框里，尺寸、朝向和速度都是有限值。L 的尺寸中位数是 1.79、4.19、1.66 米，朝向在 \([-π, π]\)，速度最大 11.4 m/s。LC 的尺寸中位数是 1.82、4.35、1.72 米，速度最大 11.1 m/s。没有出现爆炸的宽高或 NaN。
+
+这次对照里，多模态头没有超过 LiDAR 预训练模型。LC 的尺度、朝向和速度误差都更大。1 个 epoch 只训练了随机初始化的图像融合层，不能当成融合已经带来收益。L 的结果在 `experiments/transfusion_voxel_L_pretrained/results.pkl`。
+
 ## 还没做的事
 
 - 没有官方发布的完整 LC 检测权重可做对照。
-- mini 上只训了 1 个 epoch，不是官方的 6 个 epoch。
-- 自写的 `infrauni/models` 不再作为正式检测基线，也没有接入 DeTra。
+- mini 上的 LC 只训了 1 个 epoch，不是官方的 6 个 epoch。
+- 自写检测器已经从 `infrauni/models` 移除。联合轨迹见 `docs/DETRA_JOINT.md`。
