@@ -36,10 +36,22 @@ logging.getLogger("mmcv").setLevel(logging.ERROR)
 
 LC_CHECKPOINT = os.path.join(ROOT, "experiments", "transfusion_voxel_LC_mini", "epoch_1.pth")
 VARIANTS = {
-    "b": {"mode": "pred_head", "unfreeze": False, "feedback": True},
-    "c1": {"mode": "joint", "unfreeze": False, "feedback": True},
-    "c2": {"mode": "joint", "unfreeze": True, "feedback": True},
-    "c3": {"mode": "joint", "unfreeze": True, "feedback": False},
+    "b": {"mode": "pred_head", "unfreeze": False, "feedback": True, "box_mode": "full", "detach_anchor": False, "causal_time": False},
+    "c1": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "full", "detach_anchor": False, "causal_time": False},
+    "c2": {"mode": "joint", "unfreeze": True, "feedback": True, "box_mode": "full", "detach_anchor": False, "causal_time": False},
+    "c3": {"mode": "joint", "unfreeze": True, "feedback": False, "box_mode": "full", "detach_anchor": False, "causal_time": False},
+    # DeTra forecast, exported boxes stay the TransFusion proposals.
+    "d1": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "none", "detach_anchor": True, "causal_time": False},
+    # Only the current center is refined.
+    "d2": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "center", "detach_anchor": False, "causal_time": False},
+    # Full box refinement, detector frozen. Fixed query assignment.
+    "d3": {"mode": "joint", "unfreeze": False, "feedback": True, "box_mode": "full", "detach_anchor": False, "causal_time": False},
+    # Full box plus unfrozen fusion features. Forecast loss can move the center.
+    "d4": {"mode": "joint", "unfreeze": True, "feedback": True, "box_mode": "full", "detach_anchor": False, "causal_time": False},
+    # Shared features stay coupled, but the forecast loss does not drag the center.
+    "d5": {"mode": "joint", "unfreeze": True, "feedback": True, "box_mode": "full", "detach_anchor": True, "causal_time": False},
+    # Future queries cannot update the current detection query. Backward grads stay on.
+    "f0": {"mode": "joint", "unfreeze": True, "feedback": True, "box_mode": "full", "detach_anchor": False, "causal_time": True},
 }
 
 
@@ -139,6 +151,7 @@ def main():
     parser.add_argument("--max-steps", type=int, default=0)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--eval-every", type=int, default=0)
     args = parser.parse_args()
     logging.disable(logging.INFO)
     spec = VARIANTS[args.variant]
@@ -152,7 +165,14 @@ def main():
     dataset = build_dataset(train_cfg)
     detector = build_detector(cfg.model, train_cfg=cfg.get("train_cfg"), test_cfg=cfg.get("test_cfg"))
     load_checkpoint(detector, LC_CHECKPOINT, map_location="cpu")
-    model = JointTransFusionDeTra(detector, mode=spec["mode"], blocks=2)
+    model = JointTransFusionDeTra(
+        detector,
+        mode=spec["mode"],
+        blocks=2,
+        box_mode=spec["box_mode"],
+        detach_anchor=spec["detach_anchor"],
+        causal_time=spec["causal_time"],
+    )
     model.freeze_detector()
     if torch.cuda.is_available():
         model.cuda()
@@ -253,11 +273,12 @@ def main():
                             grads[token] = grads.get(token, 0.0) + float(param.grad.detach().norm())
                 print("grad_norms", {key: round(value, 5) for key, value in grads.items()}, flush=True)
             if global_step == 1 or global_step % 20 == 0:
-                message = "epoch %d step %d loss_det %.4f loss_forecast %.4f matched %d" % (
+                message = "epoch %d step %d loss_det %.4f loss_forecast %.4f matched %d switch %.3f" % (
                     epoch, global_step,
                     float(losses["loss_det"].detach()),
                     float(losses["loss_forecast"].detach()),
                     losses["matched"],
+                    float(losses.get("switch_rate", 0.0)),
                 )
                 if "loss_official" in losses:
                     message += " loss_official %.4f" % float(losses["loss_official"])
@@ -275,9 +296,29 @@ def main():
                 "epoch": epoch + 1,
                 "feedback": spec["feedback"],
                 "unfreeze": spec["unfreeze"],
+                "box_mode": spec["box_mode"],
+                "detach_anchor": spec["detach_anchor"],
+                "causal_time": spec["causal_time"],
             },
             os.path.join(work, "epoch_%d.pt" % (epoch + 1)),
         )
+        if args.eval_every and (epoch + 1) % args.eval_every == 0:
+            import subprocess
+            torch.cuda.empty_cache()
+            subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(ROOT, "tools", "eval_joint.py"),
+                    "--checkpoint",
+                    os.path.join(work, "epoch_%d.pt" % (epoch + 1)),
+                    "--metrics-name",
+                    "metrics_e%02d.pkl" % (epoch + 1),
+                ],
+                check=True,
+            )
+            model.train()
+            if spec["unfreeze"]:
+                model.unfreeze_fusion()
         if args.max_steps and global_step >= args.max_steps:
             break
     elapsed = time.perf_counter() - started

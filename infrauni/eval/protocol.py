@@ -4,11 +4,13 @@ Detection mAP and NDS are NOT computed here. They come from the nuScenes
 devkit. This file scores the same predictions for forecasting:
 
 * matching is class-wise bipartite matching on the current BEV center
-* a pair closer than 2 m is a detection match
-* minADE / minFDE / MR are averaged over those matches
+* every current ground-truth box can absorb a prediction, including short tracks
+* a prediction matched to a track that does not reach 6 s is ignored, not a false positive
+* minADE / minFDE / MR use matches whose 6 s endpoint exists
 * a match is an EPA hit only when minFDE at 6 s is within 2 m
-* unmatched predictions are false positives
-* EPA = (hits - 0.5 * false_positives) / ground_truths
+* false positives are predictions matched to no current box
+* EPA = (hits - 0.5 * false_positives) / ground_truths with a 6 s future
+* the headline mean uses moving classes only
 
 Forecast queries are the detector's own boxes. Ground-truth boxes are never
 used to spawn queries at inference.
@@ -19,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from ..data.constants import CLASS_NAMES, EPA_ALPHA, EPA_FDE, MATCH_DIST
+from ..data.constants import CLASS_NAMES, EPA_ALPHA, EPA_FDE, FORECAST_CLASSES, MATCH_DIST
 
 
 def _match(pred_xy, gt_xy):
@@ -41,7 +43,7 @@ def accumulate_forecast(predictions, ground_truth):
     per_class = {
         name: {
             "hit": 0.0, "fp": 0.0, "gt": 0.0, "ade": 0.0, "fde": 0.0,
-            "mr": 0.0, "n": 0.0, "pred": 0.0,
+            "mr": 0.0, "n": 0.0, "pred": 0.0, "ignored": 0.0,
         }
         for name in CLASS_NAMES
     }
@@ -52,24 +54,27 @@ def accumulate_forecast(predictions, ground_truth):
         if gt_mask.size == 0:
             gt_mask = np.zeros((0, future_steps))
         for class_id, name in enumerate(CLASS_NAMES):
-            # EPA and minFDE are defined at the 6 s horizon, so the last step must exist.
+            # Match every current box. A short track can absorb a detection so it
+            # is not counted as a false positive. Forecast scores use the 6 s end.
             gt_keep = np.asarray(gt["labels"]) == class_id
-            valid_end = gt_mask[:, -1] > 0 if len(gt_mask) else np.zeros((0,), dtype=bool)
-            gt_keep = gt_keep & valid_end
-            step_mask = gt_mask[gt_keep] > 0
+            class_mask = gt_mask[gt_keep] if len(gt_mask) else np.zeros((0, future_steps))
+            valid_end = class_mask[:, -1] > 0 if len(class_mask) else np.zeros((0,), dtype=bool)
             gt_xy = np.asarray(gt["current"])[gt_keep]
             gt_future = np.asarray(gt["future"])[gt_keep]
             pred_keep = np.asarray(pred["labels"]) == class_id
             pred_xy = traj[pred_keep, 0, 0, :]
             pred_future = traj[pred_keep, :, 1:, :]
             bucket = per_class[name]
-            bucket["gt"] += len(gt_xy)
+            bucket["gt"] += int(valid_end.sum()) if len(valid_end) else 0
             bucket["pred"] += len(pred_xy)
             rows, cols = _match(pred_xy, gt_xy)
             bucket["fp"] += len(pred_xy) - len(rows)
             for row, col in zip(rows, cols):
+                if not bool(valid_end[col]):
+                    bucket["ignored"] += 1
+                    continue
                 error = np.linalg.norm(pred_future[row] - gt_future[col][None], axis=-1)
-                valid = step_mask[col].astype(np.float64)
+                valid = class_mask[col].astype(np.float64)
                 ade = (error * valid).sum(axis=-1) / max(valid.sum(), 1.0)
                 fde = error[:, future_steps - 1].min()
                 bucket["ade"] += float(ade.min())
@@ -96,8 +101,9 @@ def summarize_forecast(per_class):
             "matched": bucket["n"],
             "fp": bucket["fp"],
             "pred": bucket["pred"],
+            "ignored": bucket["ignored"],
         }
-        if bucket["gt"] == 0:
+        if name not in FORECAST_CLASSES or bucket["gt"] == 0:
             continue
         hits += bucket["hit"]
         fps += bucket["fp"]
@@ -106,7 +112,7 @@ def summarize_forecast(per_class):
         fdes += bucket["fde"]
         mrs += bucket["mr"]
         count += bucket["n"]
-    present = [item["EPA"] for item in rows.values() if item["gt"] > 0]
+    present = [rows[name]["EPA"] for name in FORECAST_CLASSES if rows[name]["gt"] > 0]
     summary = {
         "EPA": float(np.mean(present)) if present else 0.0,
         "minADE": ades / count if count else None,
@@ -115,6 +121,7 @@ def summarize_forecast(per_class):
         "matched": count,
         "gt": gts,
         "fp": fps,
+        "ignored": float(sum(bucket["ignored"] for bucket in per_class.values())),
         "per_class": rows,
     }
     return summary

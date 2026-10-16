@@ -100,6 +100,31 @@ def test_ade_ignores_invalid_future_steps():
     assert summary["fp"] == 0 and summary["matched"] == 1
 
 
+def test_short_track_is_not_a_false_positive():
+    pred = {"labels": np.array([0, 0]), "trajectories": np.zeros((2, 1, 3, 2))}
+    pred["trajectories"][1, 0, :, :] = (8, 0)
+    gt = {
+        "labels": np.array([0, 0]),
+        "current": np.array([[0.0, 0.0], [8.0, 0.0]]),
+        "future": np.zeros((2, 2, 2)),
+        "future_mask": np.array([[0.0, 0.0], [1.0, 1.0]]),
+    }
+    gt["future"][1, :, :] = (8, 0)
+    car = accumulate_forecast([pred], [gt])["car"]
+    # The detection on the short track is ignored. The 6 s track is a hit.
+    assert car["fp"] == 0 and car["ignored"] == 1 and car["hit"] == 1 and car["gt"] == 1, car
+
+
+def test_detaching_the_center_stops_the_forecast_from_moving_it():
+    center = torch.tensor([1.0, 2.0], requires_grad=True)
+    offset = torch.tensor([0.4, -0.2], requires_grad=True)
+    future = center + offset
+    anchored = future - center + center.detach()
+    anchored.sum().backward()
+    assert center.grad.abs().sum().item() == 0.0
+    assert torch.allclose(offset.grad, torch.ones(2))
+
+
 def test_forecast_gradient_does_not_enter_the_box_when_feedback_is_off():
     class Tiny(nn.Module):
         def __init__(self):
@@ -141,6 +166,8 @@ if __name__ == "__main__":
     test_future_follows_the_matched_ground_truth()
     self_check()
     test_ade_ignores_invalid_future_steps()
+    test_short_track_is_not_a_false_positive()
+    test_detaching_the_center_stops_the_forecast_from_moving_it()
     test_forecast_gradient_does_not_enter_the_box_when_feedback_is_off()
     test_forward_does_not_accept_future_labels()
     print("alignment checks passed")

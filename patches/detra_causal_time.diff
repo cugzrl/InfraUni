@@ -1,0 +1,11 @@
+# Optional mask: the current-time query does not attend to future times.
+# Applied in third_party/MC-DeTra/detra_repro/models/refinement.py
+# inside RefinementBlock.forward, replacing the plain time self-attention call.
+# Default causal_time is false, so the unmodified DeTra block is unchanged.
+
+x = queries.reshape(b * n * f, t, d)
+attn_mask = None
+if getattr(self, "causal_time", False):
+    attn_mask = x.new_zeros(t, t)
+    attn_mask[0, 1:] = float("-inf")
+x, _ = self.time_attn(x, x, x, attn_mask=attn_mask)

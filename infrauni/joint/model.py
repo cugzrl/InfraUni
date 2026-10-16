@@ -71,12 +71,15 @@ def _with_current(center, future):
 class JointTransFusionDeTra(nn.Module):
     """Official detector plus either an independent head or DeTra refinement."""
 
-    def __init__(self, detector, mode="joint", blocks=2):
+    def __init__(self, detector, mode="joint", blocks=2, box_mode="full", detach_anchor=False, causal_time=False):
         super().__init__()
         if mode not in {"pred_head", "joint", "cv"}:
             raise ValueError("mode must be pred_head, joint, or cv")
         self.detector = detector
         self.mode = mode
+        self.box_mode = box_mode
+        self.detach_anchor = detach_anchor
+        self.causal_time = causal_time
         self.modes = 6
         self.future = 12
         self.data_cfg = DataConfig(
@@ -109,6 +112,9 @@ class JointTransFusionDeTra(nn.Module):
                 forecast_base_mode="current",
             )
             self.detra = QueryDeTra(cfg, self.data_cfg)
+            if causal_time:
+                for block in self.detra.blocks:
+                    block.causal_time = True
         self._captured = {}
         detector.pts_bbox_head.prediction_heads[-1].register_forward_hook(self._capture_query)
 
@@ -203,9 +209,17 @@ class JointTransFusionDeTra(nn.Module):
                 proposal_boxes[..., :7],
                 object_embed=self.query_proj(query.transpose(1, 2)),
             )
+            refined = detra_out["boxes"]
             boxes = proposal_boxes.clone()
-            boxes[..., :7] = detra_out["boxes"]
-            trajectories = _with_current(boxes[..., :2], detra_out["future_xy"])
+            if self.box_mode == "center":
+                boxes[..., :2] = refined[..., :2]
+            elif self.box_mode == "full":
+                boxes[..., :7] = refined[..., :7]
+            origin = refined[..., :2]
+            target = boxes[..., :2]
+            offset = detra_out["future_xy"] - origin[:, :, None, None, :]
+            anchor = target.detach() if self.detach_anchor or self.box_mode == "none" else target
+            trajectories = _with_current(anchor, anchor[:, :, None, None, :] + offset)
             mode_logits = detra_out["mode_logits"]
         return {
             "boxes": boxes,
@@ -218,4 +232,8 @@ class JointTransFusionDeTra(nn.Module):
             "query": query,
             "detra": detra_out,
             "outs": outs,
+            "box_mode": self.box_mode,
+            "detach_anchor": self.detach_anchor or self.box_mode == "none",
+            "object_logits": None if detra_out is None else detra_out["object_logits"],
+            "class_logits": None if detra_out is None else detra_out["class_logits"],
         }

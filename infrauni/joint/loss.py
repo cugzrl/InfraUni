@@ -66,14 +66,53 @@ def _as_batch(future, mask, targets):
     return future[None], mask[None], targets[None]
 
 
-def compute_joint_loss(output, gt_boxes, gt_labels, track, use_aux=True):
-    """Match one sample and return the detection and forecast scalars."""
+def _reanchor(pred, origin_xy):
+    """Express future waypoints as offsets from ``origin_xy`` ``[N, 2]``."""
 
-    boxes = output["boxes"][0]
+    pred = dict(pred)
+    current = pred["poses"][:, :, :, 0, :2].unsqueeze(3)
+    offset = pred["future_xy"] - current
+    pred["future_xy"] = origin_xy.detach()[None, :, None, None, :] + offset
+    return pred
+
+
+def _detach_forecast_origin(pred):
+    """Keep forecast offsets, but stop them from dragging the current center."""
+
+    pred = dict(pred)
+    origin = pred["poses"][:, :, :, 0, :2].unsqueeze(3)
+    pred["future_xy"] = pred["future_xy"] - origin + origin.detach()
+    return pred
+
+
+def _blend_box(refined, proposal, box_mode):
+    """Apply the ablation's box update on top of the TransFusion proposal."""
+
+    if box_mode == "none":
+        return proposal[:, :7]
+    box = proposal[:, :7].clone()
+    if box_mode == "center":
+        box[:, :2] = refined[:, :2]
+        return box
+    box[:, :7] = refined[:, :7]
+    return box
+
+
+def compute_joint_loss(output, gt_boxes, gt_labels, track, use_aux=True):
+    """Match one sample and return the detection and forecast scalars.
+
+    The assignment is computed once from the TransFusion proposal. Later
+    refinement blocks keep that query-to-object pairing, so a box update cannot
+    switch the future-trajectory target.
+    """
+
+    proposal = output["proposal_boxes"][0]
     labels = output["labels"][0]
-    matched = match_queries(boxes[:, :2], labels, gt_boxes[:, :2], gt_labels)
+    matched = match_queries(proposal[:, :2], labels, gt_boxes[:, :2], gt_labels)
     future, mask = attach_future(matched, gt_boxes[:, :2], gt_labels, track)
     targets = (matched >= 0).float()
+    box_mode = output.get("box_mode", "full")
+    detach_anchor = bool(output.get("detach_anchor", False))
     detra = output["detra"]
     if detra is None:
         pred = {
@@ -81,47 +120,57 @@ def compute_joint_loss(output, gt_boxes, gt_labels, track, use_aux=True):
             "poses": output["trajectories"],
             "mode_logits": output["mode_logits"],
         }
-        det = detection_loss(boxes, None, None, matched, gt_boxes[:, :7], gt_labels)
+        det = detection_loss(output["boxes"][0], None, None, matched, gt_boxes[:, :7], gt_labels)
         fore = forecast_bundle(pred, *_as_batch(future, mask, targets))
-        return {"loss_det": det["loss_det"], "loss_box": det["loss_box"], "loss_forecast": fore, "matched": int(targets.sum())}
+        return {
+            "loss_det": det["loss_det"],
+            "loss_box": det["loss_box"],
+            "loss_forecast": fore,
+            "matched": int(targets.sum()),
+            "switch_rate": 0.0,
+        }
     outputs = detra["aux_outputs"] if use_aux else [detra]
-    det_total = boxes.sum() * 0.0
-    fore_total = boxes.sum() * 0.0
+    det_total = proposal.sum() * 0.0
+    fore_total = proposal.sum() * 0.0
+    switched = compared = 0
     for block_pred in outputs:
-        block_boxes = boxes.new_zeros(boxes.shape)
-        # Each block stores its own refined box on the same query index.
         refined = _boxes_from_block(block_pred)
-        block_boxes[:, :7] = refined
+        with torch.no_grad():
+            alt = match_queries(refined[:, :2], labels, gt_boxes[:, :2], gt_labels)
+            both = (matched >= 0) & (alt >= 0)
+            compared += int(both.sum())
+            switched += int((matched[both] != alt[both]).sum()) if bool(both.any()) else 0
+        if box_mode == "none":
+            block_pred = _reanchor(block_pred, proposal[:, :2])
+        elif detach_anchor:
+            block_pred = _detach_forecast_origin(block_pred)
         class_logits = block_pred.get("class_logits")
         object_logits = block_pred.get("object_logits")
         if class_logits is not None and class_logits.ndim == 3:
             class_logits = class_logits[0]
         if object_logits is not None and object_logits.ndim == 2:
             object_logits = object_logits[0]
-        det = detection_loss(
-            block_boxes,
-            class_logits,
-            object_logits,
-            match_queries(block_boxes[:, :2], labels, gt_boxes[:, :2], gt_labels),
-            gt_boxes[:, :7],
-            gt_labels,
-        )
-        block_future, block_mask = attach_future(
-            match_queries(block_boxes[:, :2], labels, gt_boxes[:, :2], gt_labels),
-            gt_boxes[:, :2],
-            gt_labels,
-            track,
-        )
-        block_targets = (block_mask.any(dim=-1)).float()
+        if box_mode == "none":
+            det_total = det_total + refined.sum() * 0.0
+        else:
+            det = detection_loss(
+                _blend_box(refined, proposal, box_mode),
+                class_logits,
+                object_logits,
+                matched,
+                gt_boxes[:, :7],
+                gt_labels,
+            )
+            det_total = det_total + det["loss_det"]
         fore_total = fore_total + forecast_bundle(
-            block_pred, *_as_batch(block_future, block_mask, block_targets)
+            block_pred, *_as_batch(future, mask, targets)
         )
-        det_total = det_total + det["loss_det"]
     scale = float(len(outputs))
     return {
         "loss_det": det_total / scale,
         "loss_forecast": fore_total / scale,
         "matched": int(targets.sum()),
+        "switch_rate": switched / compared if compared else 0.0,
     }
 
 

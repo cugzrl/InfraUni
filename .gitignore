@@ -7,4 +7,4 @@ setup_env.sh
 environment.yml
 third_party
 checkpoints
-data
+/data/

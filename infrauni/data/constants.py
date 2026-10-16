@@ -13,6 +13,9 @@ CLASS_NAMES = [
     "traffic_cone",
 ]
 CLASS_TO_ID = {name: index for index, name in enumerate(CLASS_NAMES)}
+# Forecasting scores moving agents. Cones and barriers stay in the per-class table.
+STATIC_FORECAST_CLASSES = ("barrier", "traffic_cone")
+FORECAST_CLASSES = tuple(name for name in CLASS_NAMES if name not in STATIC_FORECAST_CLASSES)
 
 # Pedestrian and traffic cone use a 1x1 heatmap NMS kernel in TransFusion.
 PEDESTRIAN_ID = CLASS_TO_ID["pedestrian"]
