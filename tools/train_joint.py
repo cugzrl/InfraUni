@@ -130,6 +130,16 @@ def _collate(samples):
     return _prepare(batch)
 
 
+def _finite_tree(value):
+    if torch.is_tensor(value):
+        return bool(torch.isfinite(value).all())
+    if isinstance(value, dict):
+        return all(_finite_tree(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_finite_tree(item) for item in value)
+    return True
+
+
 def _official_loss(model, output, batch):
     raw = model.detector.pts_bbox_head.loss(
         batch["gt_bboxes_3d"], batch["gt_labels_3d"], output["outs"]
@@ -152,6 +162,7 @@ def main():
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--eval-every", type=int, default=0)
+    parser.add_argument("--resume", default="")
     args = parser.parse_args()
     logging.disable(logging.INFO)
     spec = VARIANTS[args.variant]
@@ -174,6 +185,12 @@ def main():
         causal_time=spec["causal_time"],
     )
     model.freeze_detector()
+    start_epoch = 0
+    if args.resume:
+        resume_path = args.resume if os.path.isabs(args.resume) else os.path.join(ROOT, args.resume)
+        resumed = torch.load(resume_path, map_location="cpu")
+        model.load_state_dict(resumed["state_dict"])
+        start_epoch = int(resumed.get("epoch", 0))
     if torch.cuda.is_available():
         model.cuda()
     model.train()
@@ -203,14 +220,15 @@ def main():
         "mode", spec["mode"],
         "unfreeze", spec["unfreeze"],
         "feedback", spec["feedback"],
+        "start_epoch", start_epoch,
         "trainable", _trainable(model),
         "frames", len(dataset),
         flush=True,
     )
     log.write("trainable %d frames %d\n" % (_trainable(model), len(dataset)))
     started = time.perf_counter()
-    global_step = 0
-    for epoch in range(args.epochs):
+    global_step = start_epoch * len(dataset)
+    for epoch in range(start_epoch, args.epochs):
         order = np.random.RandomState(args.seed + epoch).permutation(len(dataset))
         if args.max_steps:
             order = order[: args.max_steps]
@@ -231,7 +249,16 @@ def main():
             gt_boxes = batch["gt_bboxes_3d"][0].tensor.to(batch["img"].device)
             gt_labels = batch["gt_labels_3d"][0].to(gt_boxes.device).long()
             optimizer.zero_grad(set_to_none=True)
-            output = model(points=batch["points"], img=batch["img"], img_metas=batch["img_metas"])
+            try:
+                output = model(points=batch["points"], img=batch["img"], img_metas=batch["img_metas"])
+            except RuntimeError as exc:
+                if "out of memory" not in str(exc):
+                    raise
+                torch.cuda.empty_cache()
+                print("skip oom step", global_step, flush=True)
+                log.write("skip oom step %d\n" % global_step)
+                optimizer.zero_grad(set_to_none=True)
+                continue
             if global_step == 1:
                 same = torch.allclose(
                     output["boxes"][0, :, :2],
@@ -241,9 +268,19 @@ def main():
                 print("current_box_matches_trajectory", bool(same), "queries", output["boxes"].shape[1], flush=True)
             losses = compute_joint_loss(output, gt_boxes[:, :7], gt_labels, tracks[token])
             if spec["unfreeze"]:
-                official = _official_loss(model, output, batch)
-                losses["loss_det"] = losses["loss_det"] + official
-                losses["loss_official"] = official.detach()
+                try:
+                    if not _finite_tree(output["outs"]):
+                        raise ValueError("non-finite detection outputs")
+                    official = _official_loss(model, output, batch)
+                    if not torch.isfinite(official):
+                        raise ValueError("non-finite official loss")
+                    losses["loss_det"] = losses["loss_det"] + official
+                    losses["loss_official"] = official.detach()
+                except ValueError as exc:
+                    print("skip official step", global_step, exc, flush=True)
+                    log.write("skip official step %d %s\n" % (global_step, exc))
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
             finite = torch.isfinite(losses["loss_det"]) and torch.isfinite(losses["loss_forecast"])
             if not finite:
                 print("skip non-finite step", global_step, flush=True)
@@ -304,8 +341,10 @@ def main():
         )
         if args.eval_every and (epoch + 1) % args.eval_every == 0:
             import subprocess
+            # The val process loads a second copy. Move this one off the GPU first.
+            model.cpu()
             torch.cuda.empty_cache()
-            subprocess.run(
+            evaluated = subprocess.run(
                 [
                     sys.executable,
                     os.path.join(ROOT, "tools", "eval_joint.py"),
@@ -313,9 +352,11 @@ def main():
                     os.path.join(work, "epoch_%d.pt" % (epoch + 1)),
                     "--metrics-name",
                     "metrics_e%02d.pkl" % (epoch + 1),
-                ],
-                check=True,
+                ]
             )
+            print("eval_exit", epoch + 1, evaluated.returncode, flush=True)
+            if torch.cuda.is_available():
+                model.cuda()
             model.train()
             if spec["unfreeze"]:
                 model.unfreeze_fusion()
