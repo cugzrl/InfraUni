@@ -60,7 +60,7 @@ GT database 复用同一份 mini 数据里已经生成的 `nuscenes_gt_database`
 
 README 也写明因华为 IAS BU 的政策不发布预训练模型。
 
-LC 使用的是 MSMDFusion 发布的第一阶段合并权重，原文件为 `/home/kemove/devdata1/zrl/InfraUni/fusion_voxel0075_R50.pth`（135 MB）。它包含 TransFusion-L 和 nuImages 预训练的 ResNet-50 / FPN。checkpoint 里 640 个 tensor 与官方 LC 模型同名，没有多余键。其中 21 个稀疏卷积核是 `(out, kD, kH, kW, in)`，而本仓库的 `SparseConvolution` 使用 `(kD, kH, kW, in, out)`。`tools/convert_fusion_init.py` 只对这 21 个核做 `permute(1, 2, 3, 4, 0)`，写出 `checkpoints/fusion_voxel0075_R50_mmdet3d.pth`。转换后形状全部对齐。
+LC 使用的是 MSMDFusion 发布的第一阶段合并权重，原文件为 `/home/kemove/devdata1/zrl/InfraUni/fusion_voxel0075_R50.pth`（135 MB）。它包含 TransFusion-L 和 nuImages 预训练的 ResNet-50 / FPN。checkpoint 里 640 个 tensor 与官方 LC 模型同名，没有多余键。其中 21 个稀疏卷积核是 `(out, kD, kH, kW, in)`，而本仓库的 `SparseConvolution` 使用 `(kD, kH, kW, in, out)`。`tools/checkpoints/convert_fusion_init.py` 只对这 21 个核做 `permute(1, 2, 3, 4, 0)`，写出 `checkpoints/fusion_voxel0075_R50_mmdet3d.pth`。转换后形状全部对齐。
 
 模型共 928 个 tensor，加载 640 个（69.0%）。缺失的 288 个都是 LC 才有、需要在第二阶段学习的图像融合层：
 

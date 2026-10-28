@@ -5,7 +5,7 @@ import sys
 
 import torch
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "third_party", "MC-DeTra"))
 
 from detra_repro.config import DataConfig, ModelConfig

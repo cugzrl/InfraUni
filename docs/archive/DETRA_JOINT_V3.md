@@ -6,7 +6,7 @@
 
 ## 代码问题
 
-` .gitignore ` 里原来的 `data` 会忽略任意名为 `data` 的目录，`infrauni/data/future_tracks.py` 因此没有进入 Git。规则改为只忽略仓库根目录的 `/data/`。该文件和本轮的匹配、评估改动已推到 `main`（`620c30b`）。未来轨迹仍由 `tools/build_future_tracks.py` 生成，缓存不入库。
+` .gitignore ` 里原来的 `data` 会忽略任意名为 `data` 的目录，`infrauni/data/future_tracks.py` 因此没有进入 Git。规则改为只忽略仓库根目录的 `/data/`。该文件和本轮的匹配、评估改动已推到 `main`（`620c30b`）。未来轨迹仍由 `tools/data/build_future_tracks.py` 生成，缓存不入库。
 
 预测评估原先先丢掉 6 s 不完整的真值，再做当前检测匹配。一个当前框是对的、但轨迹在 6 s 前结束的目标，会被算成假阳性。现协议先对全部当前真值做类别内匈牙利匹配（2 m），匹配到短轨迹的预测记为忽略，不记假阳性。minADE、minFDE、MR 和 EPA 的分母只用 6 s 终点有效的真值。假阳性只统计没有匹配到任何当前框的预测。总指标是动态类的类别平均，不把 barrier 和 traffic_cone 算进预测均值；这两类仍保留逐类数字。检测继续用 nuScenes 官方 mAP、NDS。
 

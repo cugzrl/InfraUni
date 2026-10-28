@@ -29,4 +29,6 @@
 
 ## RESOLVE
 
-单序列 LiDAR info 在 `/home/kemove/devdata1/zrl/dataset/RESOLVE_lidar_smoke/v1.0-trainval/`。全量 info 写到 `/home/kemove/devdata1/zrl/dataset/RESOLVE_layout/v1.0-trainval/`。官方检测权重完成后记在 RESOLVE 的 `output/`，tag `infrauni_official`。场景划分 info 的文件名带 `scene`，不用于这次检测基线。
+单序列 LiDAR info 在 `/home/kemove/devdata1/zrl/dataset/RESOLVE_lidar_smoke/v1.0-trainval/`。全量 info 在 `/home/kemove/devdata1/zrl/dataset/RESOLVE_layout/v1.0-trainval/`。
+
+TransFusion-L 20 epoch 权重是 `/home/kemove/devdata1/zrl/RESOLVE/output/sunlakes_models/transfusion/infrauni_official/ckpt/checkpoint_epoch_20.pth`。随机帧验证集 mAP 0.8894，NDS 0.7257。`gt_sampling` 关闭。这个权重包含验证场景的时序帧，不能拿去做独立的轨迹测试。场景划分 info 的文件名带 `scene`。

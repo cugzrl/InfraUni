@@ -8,3 +8,7 @@ environment.yml
 third_party
 checkpoints
 /data/
+patches/
+samples/
+visual/
+.migration_backups/

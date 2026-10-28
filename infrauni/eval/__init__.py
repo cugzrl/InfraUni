@@ -1,4 +1,8 @@
-from .nusc_det import evaluate_detection
-from .protocol import summarize_forecast
+"""Evaluation APIs. Legacy nuScenes dependencies load only on use."""
+def evaluate_detection(*args, **kwargs):
+    from .nusc_det import evaluate_detection as fn
+    return fn(*args, **kwargs)
 
-__all__ = ["evaluate_detection", "summarize_forecast"]
+def summarize_forecast(*args, **kwargs):
+    from .protocol import summarize_forecast as fn
+    return fn(*args, **kwargs)

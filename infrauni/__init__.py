@@ -1,5 +1,5 @@
-"""InfraUni: LiDAR-camera detection and trajectory forecasting."""
+"""InfraUni models, data protocols and tools.
 
-from .compat import setup
-
-setup()
+Importing metrics must not load a detector or a CUDA framework.
+Legacy nuScenes tools can call infrauni.compat.setup explicitly.
+"""

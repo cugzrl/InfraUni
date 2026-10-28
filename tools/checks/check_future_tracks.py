@@ -8,7 +8,7 @@ import numpy as np
 from nuscenes.nuscenes import NuScenes
 from pyquaternion import Quaternion
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 
 from infrauni.data.constants import CLASS_TO_ID, NUSCENES_ROOT

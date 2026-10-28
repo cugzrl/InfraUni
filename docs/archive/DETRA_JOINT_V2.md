@@ -4,7 +4,7 @@
 
 ## 代码改动
 
-检测框、分数、类别和轨迹共用原始 Query 下标。`infrauni/joint/postprocess.py` 按分数、中心范围和可选半径抑制筛选下标，`tools/eval_joint.py` 用这个下标同时切片框和轨迹。评估不再用中心距离找回 Query。
+检测框、分数、类别和轨迹共用原始 Query 下标。`infrauni/joint/postprocess.py` 按分数、中心范围和可选半径抑制筛选下标，`tools/eval/eval_joint.py` 用这个下标同时切片框和轨迹。评估不再用中心距离找回 Query。
 
 真值匹配在 `infrauni/joint/targets.py`。代价是 BEV 中心距离，类别不同加 1000，匈牙利之后距离超过 2 m 或类别不同则记为未匹配。未来轨迹再按类别和 0.3 m 中心连接到缓存行，避免 dataloader 的范围过滤打乱顺序。
 
@@ -16,13 +16,13 @@ C3 与 C2 的网络和可训练参数相同。C3 先反传检测损失，再反�
 
 推理前向只接收点云、图像和元信息，不接收未来轨迹。轨迹缓存只在损失和评估里使用。
 
-单元测试 `tools/test_joint_alignment.py` 已通过，覆盖分数筛选、重复中心抑制、类别匹配、无效未来帧不进入 minADE，以及关闭反馈时轨迹梯度不进入检测权重。
+单元测试 `tools/checks/test_joint_alignment.py` 已通过，覆盖分数筛选、重复中心抑制、类别匹配、无效未来帧不进入 minADE，以及关闭反馈时轨迹梯度不进入检测权重。
 
 ## 未来轨迹
 
-`tools/build_future_tracks.py` 按样本的 `next` 和实例 ID 生成 12 个关键帧。坐标用当前帧的 `ego2global` 和 `lidar2ego` 变到当前 LiDAR 系。场景结束或实例消失时该步 mask 为 0，游标仍向前走。
+`tools/data/build_future_tracks.py` 按样本的 `next` 和实例 ID 生成 12 个关键帧。坐标用当前帧的 `ego2global` 和 `lidar2ego` 变到当前 LiDAR 系。场景结束或实例消失时该步 mask 为 0，游标仍向前走。
 
-缓存 `data/nuscenes_mini_future12.pkl`：404 帧，18364 个目标，其中 8970 个在 6 s 终点仍然有效。`tools/check_future_tracks.py` 抽查 12 帧，LiDAR 平面往返误差最大 `2.1e-6` m。相邻关键帧间隔 0.450 到 0.550 s，累计约 6 s。训练集有 8 个场景末帧，mask 全为 0。mini 上没有“中途消失后又出现”的实例，中断都是尾部无效步。
+缓存 `data/nuscenes_mini_future12.pkl`：404 帧，18364 个目标，其中 8970 个在 6 s 终点仍然有效。`tools/checks/check_future_tracks.py` 抽查 12 帧，LiDAR 平面往返误差最大 `2.1e-6` m。相邻关键帧间隔 0.450 到 0.550 s，累计约 6 s。训练集有 8 个场景末帧，mask 全为 0。mini 上没有“中途消失后又出现”的实例，中断都是尾部无效步。
 
 匀速基线用 TransFusion 预测速度，步长按名义 0.5 s。真实时间戳有大约 50 ms 抖动，没有把未来时间戳送进网络。
 

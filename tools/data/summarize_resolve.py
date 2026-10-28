@@ -12,7 +12,7 @@ import random
 ROOT = "/home/kemove/devdata1/zrl/dataset/RESOLVE"
 ANNOTATION = os.path.join(ROOT, "HSQJN_3.json")
 SPLIT_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "infrauni", "data", "resolve_scene_split.json"
+    os.path.dirname(__file__), "..", "..", "infrauni", "data", "resolve_scene_split.json"
 )
 
 

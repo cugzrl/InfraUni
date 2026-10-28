@@ -8,7 +8,7 @@
 
 ## LiDAR-only 转换
 
-官方命令行的 `--use_cam` 和 `--with_cam_gt` 默认打开，而且 `store_true` 关不掉。`tools/convert_resolve_lidar.py` 直接调用 `rotate_point_cloud` 和 `create_dataset_from_json`，传入 `use_cam=False`、`use_lidar=True`。传感器是 `os128`，点云绕 z 轴旋转 -142.5 度。缺少点云的 128 帧直接跳过，不用相邻帧填补。
+官方命令行的 `--use_cam` 和 `--with_cam_gt` 默认打开，而且 `store_true` 关不掉。`tools/data/convert_resolve_lidar.py` 直接调用 `rotate_point_cloud` 和 `create_dataset_from_json`，传入 `use_cam=False`、`use_lidar=True`。传感器是 `os128`，点云绕 z 轴旋转 -142.5 度。缺少点云的 128 帧直接跳过，不用相邻帧填补。
 
 先转换完整序列 `rosbag2_2026_01_13-16_05_56`，27 帧全部有点云。核对 177 个保留框后，旋转中心、尺寸、朝向和官方类别的误差为 0。训练 info 22 条，验证 info 5 条。这一小划分只用于检查数据流，`m=1`，不是论文划分。
 
@@ -38,12 +38,16 @@
 
 ## 训练
 
-启动脚本是 `tools/train_resolve_l.py`。它在 RESOLVE 的 `tools` 目录调用官方 `train.py`，模型、损失、优化器和增强仍是 `transfusion.yaml`。官方设置是 batch 4、20 epoch、Adam one-cycle、学习率 0.001、权重衰减 0.01、梯度裁剪 35。评估项在 yaml 里是 `kitti`。
+启动脚本是 `tools/train/train_resolve_l.py`。它在 RESOLVE 的 `tools` 目录调用官方 `train.py`，模型、损失、优化器和增强仍是 `transfusion.yaml`。官方设置是 batch 4、20 epoch、Adam one-cycle、学习率 0.001、权重衰减 0.01、梯度裁剪 35。评估项在 yaml 里是 `kitti`。
 
 当前唯一的训练差异是关掉 `gt_sampling`，因为真值库还没生成。单序列 `rosbag2_2026_01_13-16_05_56` 已用官方训练器跑完 1 个 epoch：22 个 iter，4.6 秒，损失从 965.5 降到 22.62。one-cycle 在这 22 步里从 1.00e-4 收到 1.26e-5，这是 1 个 epoch 被压缩后的学习率，不是 20 epoch 的曲线。checkpoint `checkpoint_epoch_1.pth` 可以完整载入 307 个参数。5 帧验证的 mAP 和 NDS 都是 0，平均输出 100 个框，符合未收敛的随机初始化，不能当作基线。
 
 全量 LiDAR info 已写完。旋转成功 17042 帧，跳过 128 帧。没有点落入框内的帧被官方函数丢掉，最后保留 16380 帧。官方随机划分是训练 13104、验证 3276，`m=4`，没有余数。场景划分是训练 11556、验证 2472、测试 2352，没有未知场景。
 
-20 epoch 已在 GPU 1 上开始。batch 4 占用约 9.2 GB。第 1 个 iter 损失 980.8，第 500 个 iter 损失 4.076，学习率约 1.01e-4，仍在 one-cycle 的上升段，峰值是官方的 0.001。稳定后每个 batch 约 0.25 秒，一个 epoch 约 15 分钟，20 个 epoch 大约 5 小时。每 5 个 epoch 存一次 checkpoint。`gt_sampling` 仍然关闭。权重目录是 `output/sunlakes_models/transfusion/infrauni_official/`。验证和误检可视化在第 20 个 epoch 结束后由官方评估写出。
+20 epoch 已在 GPU 1 上跑完，用时 4 小时 1 分。batch 4 约占 9.2 GB，稳定后每个 batch 约 0.22 秒。学习率按官方 one-cycle 从 1e-4 升到 1e-3，再收到 1e-8。第 1 个 iter 损失 980.8，第 1 个 epoch 末约 1.01，第 20 个 epoch 末 0.098，该 epoch 平均 0.081。`gt_sampling` 仍然关闭。权重在 `output/sunlakes_models/transfusion/infrauni_official/ckpt/checkpoint_epoch_20.pth`，评估时完整载入 307 个参数。中间权重按每 5 个 epoch 保存。
+
+验证集 3276 帧。官方数据集实际打出的是 nuScenes 式指标，尽管 yaml 里写着 `kitti`：mAP 0.8894，NDS 0.7257。平移误差 0.202 m，尺度误差 0.108，朝向误差 0.059 rad，速度误差 0.821 m/s。属性误差是 1.0，因为这个头不预测属性，NDS 被这一项拉低。0.5 IoU 召回 0.958。平均每帧输出 199.2 个框，低分框很多，mAP 仍由分数排序决定。
+
+逐类平均 AP：车 0.932，卡车 0.904，公交 0.938，拖车 0.892，工程车 0.938，行人 0.955，摩托 0.863，自行车 0.909，锥桶 0.986，路障 0.578。路障在 0.5 m 处的 AP 只有 0.0095，到 2 m 才回到 0.921，定位是主要问题。按距离看，0–50 m 的 mAP 是 0.927，50–70 m 是 0.901，70 m 以外降到 0.746，其中路障 0.390、拖车 0.608。预测结果在 `eval/eval_with_train/epoch_20/val/final_result/data/results_nusc.json`。官方评估没有另存检测图像。
 
 权重会写在 RESOLVE 的 `output/` 下面，tag 是 `infrauni_oneseq` 或 `infrauni_official`。不要把 nuScenes 的 LC 权重载进这个头。

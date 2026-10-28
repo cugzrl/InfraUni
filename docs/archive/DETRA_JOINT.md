@@ -13,7 +13,7 @@ MC-DeTra 是 DeTra（ECCV 2024）的第三方复现，另外带有只在训练�
 - `PoseUpdate`：当前框残差，以及双向 GRU 的多模态未来轨迹。未来位置是当前中心加偏移，所以轨迹损失会带动当前框
 - `wta_forecasting_loss`：按 L1 选择赢家模式，再做回归
 
-`tools/check_detra_core.py` 在不接检测器的情况下跑了 2 个 block。未来轨迹形状是 `[1, 4, 6, 12, 2]`，六个模式在当前时刻的位置相同。`smooth_l1` 赢家损失反传后，BEV 特征、可变形采样偏移和框头都有梯度。
+`tools/checks/check_detra_core.py` 在不接检测器的情况下跑了 2 个 block。未来轨迹形状是 `[1, 4, 6, 12, 2]`，六个模式在当前时刻的位置相同。`smooth_l1` 赢家损失反传后，BEV 特征、可变形采样偏移和框头都有梯度。
 
 和论文的差异：
 
@@ -41,7 +41,7 @@ MC-DeTra 是 DeTra（ECCV 2024）的第三方复现，另外带有只在训练�
 
 ## 梯度
 
-`tools/check_joint_grad.py` 只打开 BEV neck、图像 query decoder 和最后一层预测头，反传轨迹损失：
+`tools/checks/check_joint_grad.py` 只打开 BEV neck、图像 query decoder 和最后一层预测头，反传轨迹损失：
 
 | 模块 | 有梯度 |
 | --- | --- |

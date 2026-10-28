@@ -11,8 +11,8 @@ import sys
 
 import torch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from tools.train_joint import (  # noqa: E402
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from tools.train.train_joint import (  # noqa: E402
     LC_CHECKPOINT,
     ROOT,
     _collate,

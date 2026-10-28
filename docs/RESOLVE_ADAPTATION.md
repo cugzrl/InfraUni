@@ -20,7 +20,7 @@
 
 官方 `tools/create_sunlakes_data_v3.py` 从 `data_prefix/HSQJN_3.json` 取标注，再到 `data_prefix/resource/<bag>/128_128b_label/<stamp>.bin` 读点云。下载的点云在 `<bag>/128_128b_sync/`。抽查 `rosbag2_2025_10_17-09_29_02/128_128b_sync/1760718487-550083650.bin` 存在，同名的 `128_128b_label` 不存在。
 
-`tools/link_resolve_layout.py` 在 `/home/kemove/devdata1/zrl/dataset/RESOLVE_layout/2026-01-04_18_02_01-export` 建立软链接：`128_128b_label`、`64_64b_label`、`16_16b_label` 以及四路 `axis*_label` 分别指向对应的 `*_sync`。解压完成后共 934 条链接、按 bag 复制的标定 808 个文件。原始 bag 和压缩包没有移动。
+`tools/data/link_resolve_layout.py` 在 `/home/kemove/devdata1/zrl/dataset/RESOLVE_layout/2026-01-04_18_02_01-export` 建立软链接：`128_128b_label`、`64_64b_label`、`16_16b_label` 以及四路 `axis*_label` 分别指向对应的 `*_sync`。解压完成后共 934 条链接、按 bag 复制的标定 808 个文件。原始 bag 和压缩包没有移动。
 
 点云预处理是绕雷达原点的 `Rz(rot_pc)`，默认 `-142.5` 度。标定写成 `lidar2camera = extrinsic @ Rz.T`，使图像、框和旋转后的点云落在同一坐标系。适配时必须连这组旋转一起用。只旋转点云、不改外参，投影会错。
 
