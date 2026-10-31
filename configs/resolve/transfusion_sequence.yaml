@@ -11,7 +11,7 @@ CLASS_NAMES:
 - traffic_cone
 DATA_CONFIG:
   DATASET: ResolveSequenceDataset
-  DATA_PATH: /home/kemove/devdata1/zrl/InfraUni/data/resolve_protocol
+  DATA_PATH: /home/kemove/devdata1/zrl/InfraUni/data/resolve_multimodal
   VERSION: ''
   PRED_VELOCITY: true
   SET_NAN_VELOCITY_TO_ZEROS: true
@@ -21,16 +21,16 @@ DATA_CONFIG:
     test: val
   INFO_PATH:
     train:
-    - train.pkl
+    - infos/train.pkl
     test:
-    - val.pkl
-  POINT_CLOUD_RANGE:
-  - -60
-  - -60
-  - -8.0
-  - 88.8
-  - 88.8
-  - 0
+    - infos/val.pkl
+  POINT_CLOUD_RANGE: &id001
+  - -120.0
+  - -96.0
+  - -10.0
+  - 72.0
+  - 96.0
+  - 2.0
   BALANCED_RESAMPLING: false
   DATA_AUGMENTOR:
     DISABLE_AUG_LIST: []
@@ -65,6 +65,7 @@ DATA_CONFIG:
     MAX_NUMBER_OF_VOXELS:
       train: 120000
       test: 160000
+  FILTER_EMPTY_GT: false
 MODEL:
   NAME: TransFusion
   VFE:
@@ -75,12 +76,12 @@ MODEL:
     USE_BIAS: false
     IN_CHANNEL: 5
     GRID_SIZE:
-    - 496
-    - 496
-    - 40
+    - 640
+    - 640
+    - 60
   MAP_TO_BEV:
     NAME: HeightCompression
-    NUM_BEV_FEATURES: 256
+    NUM_BEV_FEATURES: 384
   BACKBONE_2D:
     NAME: BaseBEVBackbone
     LAYER_NUMS:
@@ -175,13 +176,7 @@ MODEL:
         alpha: 0.25
     POST_PROCESSING:
       SCORE_THRESH: 0.0
-      POST_CENTER_RANGE:
-      - -70
-      - -70
-      - -10
-      - 95
-      - 95
-      - 2
+      POST_CENTER_RANGE: *id001
       USE_IOU_TO_RECTIFY_SCORE: true
       IOU_RECTIFIER:
       - 0.5
@@ -223,3 +218,4 @@ OPTIMIZATION:
   WARMUP_EPOCH: 1
   GRAD_NORM_CLIP: 35
   LOSS_SCALE_FP16: 4.0
+  USE_AMP: false

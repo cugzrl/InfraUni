@@ -53,3 +53,5 @@ CUDA_VISIBLE_DEVICES=0 /home/kemove/anaconda3/envs/pcdet/bin/python tools/visual
 ## 相同样例的标注真值
 
 使用 /home/kemove/anaconda3/envs/forecast_mae/bin/python tools/visualization/visualize_resolve_gt.py，结果在 visual/gt，仅含50张图片，与两模型的样例、相机底图和文件名一致。真值直接读取共享验证标签并逐帧与原缓存核对，无分数过滤，也不在目标上绘制文字。
+
+SparseDrive: tools/train/train_sparsedrive_resolve.py; tools/eval/eval_sparsedrive_resolve.py; full instructions: ../docs/RESOLVE_SPARSEDRIVE.md.

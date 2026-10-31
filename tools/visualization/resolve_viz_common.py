@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from detra_repro.data.resolve_camera import CAMERAS, read_lidar_xyz
-from tools.visualization.visualize_resolve_cameras import draw_projection, _label_panel, _mosaic
+from tools.visualization.visualize_resolve_cameras import draw_projection, _mosaic
 
 ROOT=Path(__file__).resolve().parents[2]
 
@@ -45,13 +45,9 @@ def render_frame(cache,item,info,boxes,names,out,index,model_name,threshold):
             image=cv2.imread(str(path))
             if image is None:raise FileNotFoundError(path)
             canvas,counts=draw_projection(image,points,boxes[:,:7],names,camera['lidar2cam'][ci],camera['K'][ci],camera['distortion'][ci],80.)
-            # Intentionally no per-object class/score text. Keep a small frame header.
-            title='%02d | %s | %s | points %d | boxes %d'%(index,model_name,name,counts['points_projected'],counts['boxes_drawn'])
-            if threshold is not None: title+=' | threshold %.2f'%threshold
-            panel=_label_panel(canvas,title)
             filename=stem+'_'+name+'.jpg'
-            if not cv2.imwrite(str(out/filename),panel,[cv2.IMWRITE_JPEG_QUALITY,95]):raise IOError(filename)
-            panels.append(panel);stats.append(dict(camera=name,file=filename,**counts))
+            if not cv2.imwrite(str(out/filename),canvas,[cv2.IMWRITE_JPEG_QUALITY,95]):raise IOError(filename)
+            panels.append(canvas);stats.append(dict(camera=name,file=filename,**counts))
         filename=stem+'_00_overview.jpg'
         if not cv2.imwrite(str(out/filename),_mosaic(panels),[cv2.IMWRITE_JPEG_QUALITY,95]):raise IOError(filename)
     return stats,filename

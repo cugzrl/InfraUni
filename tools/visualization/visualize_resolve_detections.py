@@ -29,7 +29,6 @@ from detra_repro.eval.resolve_detection import DET_MAX_BOXES, load_resolve_modul
 from detra_repro.losses import current_boxes_from_pred  # noqa: E402
 from tools.visualization.visualize_resolve_cameras import (  # noqa: E402
     _box_count,
-    _label_panel,
     _mosaic,
     _publish_file,
     draw_projection,
@@ -197,13 +196,8 @@ def export_detections(
                     camera["distortion"][index],
                     depth_max,
                 )
-                text = (
-                    f"{camera_name}  points {stats['points_projected']}  "
-                    f"det {stats['boxes_drawn']}/{len(boxes)}  score>={score_thresh:.2f}"
-                )
-                labeled = _label_panel(canvas, text)
-                cv2.imwrite(str(vis_dir / f"{camera_name}.jpg"), labeled, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                panels.append(labeled)
+                cv2.imwrite(str(vis_dir / f"{camera_name}.jpg"), canvas, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                panels.append(canvas)
                 per_camera.append({"camera": camera_name, **stats})
             mosaic_path = vis_dir / "mosaic.jpg"
             cv2.imwrite(str(mosaic_path), _mosaic(panels), [cv2.IMWRITE_JPEG_QUALITY, 90])

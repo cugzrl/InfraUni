@@ -3,8 +3,9 @@
 
 The points are the raw synchronized ``128_128b_sync`` frame named by the
 camera cache, not the ROI-cropped multi-sweep tensor. Boxes are the cache
-ground truth in that same lidar frame. Depth coloring and box colors follow
-``SSLFusion/tools/visualize_labels.py``.
+ground truth in that same lidar frame. Depth coloring stays the same.
+Box colors are per-class macaron RGB values, drawn thicker so they stay
+readable on the roadside images.
 """
 
 from __future__ import annotations
@@ -26,12 +27,27 @@ if str(ROOT) not in sys.path:
 from detra_repro.data.resolve_camera import (  # noqa: E402
     BOX_EDGES,
     CAMERAS,
-    CLASS_BGR,
     CLASS_NAMES,
     boxes_to_corners_3d,
     project_points,
     read_lidar_xyz,
 )
+
+# RGB from the class table, stored as OpenCV BGR. ``barrier`` is absent from
+# that table and keeps a neutral gray.
+BOX_COLOR_BGR = {
+    "car": (0xDF, 0xB1, 0xFD),
+    "truck": (0x9B, 0x99, 0xF3),
+    "bus": (0x74, 0xA8, 0xFB),
+    "trailer": (0x78, 0xC7, 0xFF),
+    "construction_vehicle": (0x8E, 0xDB, 0xCF),
+    "motorcycle": (0xA7, 0xD7, 0x86),
+    "bicycle": (0xE7, 0xE2, 0xA1),
+    "traffic_cone": (0xE5, 0xC9, 0x82),
+    "pedestrian": (0xEB, 0xA4, 0xBB),
+    "barrier": (180, 180, 180),
+}
+BOX_LINE_THICKNESS = 4
 
 
 def _depth_colors(depth: np.ndarray, depth_max: float) -> np.ndarray:
@@ -54,7 +70,7 @@ def _depth_colors(depth: np.ndarray, depth_max: float) -> np.ndarray:
 
 
 def _class_bgr(name: str) -> tuple[int, int, int]:
-    return CLASS_BGR.get(name, (244, 196, 42))
+    return BOX_COLOR_BGR.get(name, (180, 180, 180))
 
 
 def draw_projection(
@@ -110,20 +126,13 @@ def draw_projection(
                 p2 = (int(round(corner_uv[end, 0])), int(round(corner_uv[end, 1])))
                 ok, q1, q2 = cv2.clipLine((0, 0, width, height), p1, p2)
                 if ok:
-                    cv2.line(canvas, q1, q2, color, 2, lineType=cv2.LINE_AA)
+                    cv2.line(canvas, q1, q2, color, BOX_LINE_THICKNESS, lineType=cv2.LINE_AA)
     stats = {
         "points_projected": int(mask.sum()),
         "boxes_drawn": boxes_drawn,
         "image_hw": [int(height), int(width)],
     }
     return canvas, stats
-
-
-def _label_panel(image: np.ndarray, text: str) -> np.ndarray:
-    panel = image.copy()
-    cv2.rectangle(panel, (0, 0), (panel.shape[1], 36), (0, 0, 0), -1)
-    cv2.putText(panel, text, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-    return panel
 
 
 def _mosaic(panels: list[np.ndarray]) -> np.ndarray:
@@ -247,13 +256,8 @@ def export_and_render(
                     camera["distortion"][index],
                     depth_max,
                 )
-                text = (
-                    f"{camera_name}  points {stats['points_projected']}  "
-                    f"boxes {stats['boxes_drawn']}/{len(boxes)}"
-                )
-                labeled = _label_panel(canvas, text)
-                cv2.imwrite(str(vis_dir / f"{camera_name}.jpg"), labeled, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                panels.append(labeled)
+                cv2.imwrite(str(vis_dir / f"{camera_name}.jpg"), canvas, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                panels.append(canvas)
                 per_camera.append(
                     {
                         "camera": camera_name,
