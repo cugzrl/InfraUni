@@ -61,6 +61,7 @@ def status():
     result['tf_transition_gate']=tf_gate()
     from check_bevfusion_roi_v2 import status as bevfusion_status
     result['bevfusion']=bevfusion_status()
+    result['bevfusion_completion']=read_json(RUN/'checks/bevfusion_completion.json')
     result['gpu']=subprocess.check_output(['nvidia-smi','--query-gpu=index,memory.used,memory.total,utilization.gpu','--format=csv'],text=True)
     return result
 if __name__=='__main__':print(json.dumps(status(),indent=2))
